@@ -252,6 +252,14 @@ impl fmt::Debug for StorageConfig {
 pub async fn open(config: &StorageConfig) -> Result<Arc<dyn StorageBackend>> {
     match config {
         StorageConfig::Memory => Ok(Arc::new(MemoryStorage::new())),
+        #[cfg(feature = "file")]
+        StorageConfig::File { dir } => Ok(Arc::new(tinystoragedrivers_file::FileStorage::open(
+            dir.clone(),
+        )?)),
+        #[cfg(feature = "sqlite")]
+        StorageConfig::Sqlite { path } => Ok(Arc::new(
+            tinystoragedrivers_sqlite::SqliteStorage::open(path)?,
+        )),
         other => Err(StorageError::invalid_input(format!(
             "storage URL `{other}` needs the `{}` driver, which is not available in this build of tinystoragedrivers",
             other.driver()

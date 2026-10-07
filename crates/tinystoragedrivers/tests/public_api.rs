@@ -31,3 +31,15 @@ async fn the_secrets_feature_re_exports_the_secret_store_drivers() {
         b"sk-live"
     );
 }
+
+#[cfg(feature = "file")]
+#[tokio::test]
+async fn a_file_url_opens_a_conforming_backend() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("file:{}", dir.path().display());
+    let backend = tinystoragedrivers::open(&StorageConfig::parse(&url).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(backend.driver(), "file");
+    conformance::run(backend.as_ref(), false).await;
+}

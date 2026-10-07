@@ -101,7 +101,15 @@ fn names_its_driver_and_renders() {
 async fn opens_memory_and_names_missing_features() {
     let backend = open(&StorageConfig::Memory).await.unwrap();
     assert_eq!(backend.driver(), "memory");
-    for url in ["sqlite:/tmp/x", "mongodb://h/db", "file:/tmp/x"] {
+    let mut missing = Vec::new();
+    if cfg!(not(feature = "sqlite")) {
+        missing.push("sqlite:/tmp/x");
+    }
+    missing.push("mongodb://h/db");
+    if cfg!(not(feature = "file")) {
+        missing.push("file:/tmp/x");
+    }
+    for url in missing {
         let config = StorageConfig::parse(url).unwrap();
         let error = open(&config).await.map(|_| ()).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
@@ -112,6 +120,21 @@ async fn opens_memory_and_names_missing_features() {
             "{error}"
         );
     }
+}
+
+#[cfg(feature = "file")]
+#[tokio::test]
+async fn opens_a_file_url_with_the_file_feature() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = StorageConfig::parse(&format!("file:{}", dir.path().display())).unwrap();
+    let backend = open(&config).await.unwrap();
+    assert_eq!(backend.driver(), "file");
+
+    let file = dir.path().join("not-a-dir");
+    std::fs::write(&file, b"x").unwrap();
+    let blocked = StorageConfig::File { dir: file };
+    let error = open(&blocked).await.map(|_| ()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
 }
 
 #[test]
@@ -137,6 +160,22 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
         "mongodb://h/?tlsCertificateKeyFilePassword=***&x"
     );
     assert_eq!(redact("mongodb://h?x=1"), "mongodb://h/?x=1");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn opens_sqlite_directories_and_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}", dir.path().display());
+    let backend = open(&StorageConfig::parse(&url).unwrap()).await.unwrap();
+    assert_eq!(backend.driver(), "sqlite");
+    assert!(dir.path().join("storage.db").exists());
+    let file = dir.path().join("single.db");
+    let backend = open(&StorageConfig::Sqlite { path: file.clone() })
+        .await
+        .unwrap();
+    assert_eq!(backend.driver(), "sqlite");
+    assert!(file.exists());
 }
 
 #[test]

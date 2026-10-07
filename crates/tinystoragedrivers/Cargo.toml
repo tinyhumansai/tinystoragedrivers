@@ -15,6 +15,9 @@ publish = false
 # The ports, the memory driver and the shared types. Re-exported wholesale so a
 # consumer takes one dependency.
 tinystoragedrivers-core = { workspace = true }
+# The plain-file driver, compiled in only with the `file` feature.
+tinystoragedrivers-file = { workspace = true, optional = true }
+tinystoragedrivers-sqlite = { workspace = true, optional = true }
 # The `SecretStore` port and its drivers, re-exported as `secrets`.
 tinystoragedrivers-secrets = { workspace = true, optional = true }
 
@@ -23,13 +26,19 @@ tinystoragedrivers-secrets = { workspace = true, optional = true }
 tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde_json = { workspace = true }
+# A throwaway directory for the `file:` URL test.
+tempfile = { workspace = true }
 
 [features]
 default = []
+# `sqlite:` URLs and bare paths: the SQLite driver.
+sqlite = ["dep:tinystoragedrivers-sqlite"]
 # Re-export the core's synchronous bridge.
 blocking = ["tinystoragedrivers-core/blocking"]
 # Re-export the core's conformance suite for downstream repository tests.
 testkit = ["tinystoragedrivers-core/testkit", "tinystoragedrivers-secrets?/testkit"]
+# `file:<dir>`: JSON documents, JSONL streams and raw blobs under a directory.
+file = ["dep:tinystoragedrivers-file"]
 # Re-export `tinystoragedrivers-secrets` as `tinystoragedrivers::secrets`:
 # encrypted secrets in memory, a `secrets.enc` file, or any `DocumentStore`.
 secrets = ["dep:tinystoragedrivers-secrets"]

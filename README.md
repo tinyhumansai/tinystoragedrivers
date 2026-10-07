@@ -7,9 +7,9 @@ on one small set of ports. The host chooses the backend once at boot, from a URL
 | Deployment | URL | Driver |
 | --- | --- | --- |
 | Tests, stateless embedders | `memory` | in-process maps |
-| Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file per named database *(planned)* |
+| Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file per named database (feature `sqlite`) |
 | Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant *(planned)* |
-| Plain files | `file:<dir>` | JSON and JSONL on disk *(planned)* |
+| Plain files | `file:<dir>` | JSON documents, JSONL streams and raw blobs on disk (`tinystoragedrivers-file`, feature `file`) |
 | Secrets | none (feature `secrets`, `keyring`) | `SecretStore`: OS keyring, encrypted `secrets.enc`, or `enc2:` ciphertext in any `DocumentStore` |
 
 Drivers are separate crates. A host compiles in only the ones it enables, as
@@ -63,6 +63,8 @@ async fn demo() -> tinystoragedrivers::Result<()> {
 crates/
 ├── tinystoragedrivers-core/   # ports, Scope, filters, errors, memory driver,
 │                              # blocking bridge, conformance suite
+├── tinystoragedrivers-file/   # `file:<dir>`: JSON, JSONL and raw files
+├── tinystoragedrivers-sqlite/ # SQLite: generic tables, FTS5, native access
 ├── tinystoragedrivers-secrets/ # SecretStore port: memory, secrets.enc file,
 │                              # DocumentStore and OS keyring drivers
 └── tinystoragedrivers/        # facade: StorageConfig URL parsing, open(),
