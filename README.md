@@ -9,7 +9,7 @@ on one small set of ports. The host chooses the backend once at boot, from a URL
 | Tests, stateless embedders | `memory` | in-process maps |
 | Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file per named database *(planned)* |
 | Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant *(planned)* |
-| Plain files | `file:<dir>` | JSON and JSONL on disk *(planned)* |
+| Plain files | `file:<dir>` | JSON documents, JSONL streams and raw blobs on disk (`tinystoragedrivers-file`, feature `file`) |
 
 Drivers are separate crates. A host compiles in only the ones it enables, as
 Cargo features on the `tinystoragedrivers` facade. A desktop build never links
@@ -62,6 +62,7 @@ async fn demo() -> tinystoragedrivers::Result<()> {
 crates/
 ├── tinystoragedrivers-core/   # ports, Scope, filters, errors, memory driver,
 │                              # blocking bridge, conformance suite
+├── tinystoragedrivers-file/   # `file:<dir>`: JSON, JSONL and raw files
 └── tinystoragedrivers/        # facade: StorageConfig URL parsing, open(),
                                # driver features, re-exports the core
 ```
