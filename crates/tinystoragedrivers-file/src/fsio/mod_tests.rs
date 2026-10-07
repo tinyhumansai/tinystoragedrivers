@@ -176,3 +176,17 @@ fn a_planted_temporary_symlink_is_never_followed() {
     assert_eq!(std::fs::read(&target).unwrap(), b"new");
     assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_is_refused_for_reads_and_appends() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    std::fs::write(&real, b"data").unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert!(read_optional(&link).is_err());
+    assert!(open_read(&link).is_err());
+    assert!(open_append(&link).is_err());
+    assert_eq!(std::fs::read(&real).unwrap(), b"data");
+}

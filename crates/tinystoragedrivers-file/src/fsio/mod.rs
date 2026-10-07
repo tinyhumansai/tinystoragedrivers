@@ -8,7 +8,7 @@
 //! encoded name does, so listings skip any a crash left behind.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -35,10 +35,48 @@ pub(crate) fn io_error(action: &'static str) -> impl Fn(io::Error) -> StorageErr
     }
 }
 
-/// Read a whole file, or `None` when it does not exist.
+/// Make `options` refuse a symlink at the final path component: `O_NOFOLLOW`
+/// on Unix, and on Windows opening the reparse point itself, which
+/// [`require_regular`] then rejects.
+fn no_follow(options: &mut OpenOptions) -> &mut OpenOptions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT
+        options.custom_flags(0x0020_0000)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        options
+    }
+}
+
+/// Fail unless `file` is a regular file, so a symlink, device or directory
+/// planted at a data path is refused rather than read or appended to.
+fn require_regular(file: File) -> io::Result<File> {
+    if file.metadata()?.file_type().is_file() {
+        Ok(file)
+    } else {
+        Err(io::Error::other("not a regular file"))
+    }
+}
+
+/// Open `path` for reading without following a symlink; only a regular file
+/// opens.
+pub(crate) fn open_read(path: &Path) -> io::Result<File> {
+    require_regular(no_follow(OpenOptions::new().read(true)).open(path)?)
+}
+
+/// Read a whole file, or `None` when it does not exist. A symlink is refused.
 pub(crate) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
+    let mut bytes = Vec::new();
+    match open_read(path).and_then(|mut file| file.read_to_end(&mut bytes)) {
+        Ok(_) => Ok(Some(bytes)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io_error("read a file")(error)),
     }
@@ -146,10 +184,14 @@ pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Remove a file, reporting whether it existed.
+/// Remove a file, reporting whether it existed. The parent directory is
+/// synced so the removal survives a crash.
 pub(crate) fn remove_optional(path: &Path) -> Result<bool> {
     match fs::remove_file(path) {
-        Ok(()) => Ok(true),
+        Ok(()) => {
+            sync_dir(parent(path)?)?;
+            Ok(true)
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(io_error("remove a file")(error)),
     }
@@ -184,13 +226,12 @@ pub(crate) fn files_with_suffix(dir: &Path, suffix: &str) -> Result<Vec<PathBuf>
 }
 
 /// Open `path` for appending, creating it (and its directory) when missing.
+/// A symlink at `path` is refused, not followed.
 pub(crate) fn open_append(path: &Path) -> Result<File> {
     fs::create_dir_all(parent(path)?).map_err(io_error("create a directory"))?;
-    OpenOptions::new()
-        .read(true)
-        .append(true)
-        .create(true)
+    no_follow(OpenOptions::new().read(true).append(true).create(true))
         .open(path)
+        .and_then(require_regular)
         .map_err(io_error("open a stream file"))
 }
 

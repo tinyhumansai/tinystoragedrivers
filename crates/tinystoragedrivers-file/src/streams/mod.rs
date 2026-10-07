@@ -31,10 +31,15 @@ use tinystoragedrivers_core::{
 
 use crate::encode::file_stem;
 use crate::fsio::{
-    files_with_suffix, io_error, open_append, read_json, remove_optional, write_atomic_with,
-    write_json,
+    files_with_suffix, io_error, open_append, open_read, read_json, remove_optional, sync_dir,
+    write_atomic_with, write_json,
 };
 use crate::storage::Db;
+
+/// The directory holding a stream file.
+fn parent_of(path: &std::path::Path) -> &std::path::Path {
+    path.parent().unwrap_or_else(|| std::path::Path::new("."))
+}
 
 const META_SUFFIX: &str = ".meta.json";
 
@@ -162,7 +167,7 @@ fn length(meta: &StreamMeta, last_line: Option<&[u8]>) -> Result<u64> {
 
 /// The length of an existing stream.
 fn stream_len(paths: &Paths, meta: &StreamMeta) -> Result<u64> {
-    match File::open(&paths.data) {
+    match open_read(&paths.data) {
         Ok(mut file) => {
             let (_, last) = tail(&mut file)?;
             length(meta, last.as_deref())
@@ -174,7 +179,7 @@ fn stream_len(paths: &Paths, meta: &StreamMeta) -> Result<u64> {
 
 /// Every complete line of the stream file at or after `from`, at most `limit`.
 fn read_lines(paths: &Paths, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {
-    let file = match File::open(&paths.data) {
+    let file = match open_read(&paths.data) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(io_error("open a stream file")(error)),
@@ -231,6 +236,13 @@ impl StreamStore for FileStreams {
                 bytes.push(b'\n');
             }
             if created {
+                // Clear any orphan and persist the new entry before the stream
+                // becomes visible, so a crash cannot publish a new stream that
+                // still holds a deleted one's records.
+                file.set_len(0)
+                    .and_then(|()| file.sync_data())
+                    .map_err(io_error("append to a stream file"))?;
+                sync_dir(parent_of(&paths.data))?;
                 write_json(&paths.meta, &meta)?;
             }
             // Cut off a torn line a crashed append left, so the new lines
@@ -298,7 +310,7 @@ impl StreamStore for FileStreams {
             write_json(&paths.meta, &meta)?;
             // Copy the retained lines into the replacement file one at a
             // time: memory stays at one line however long the stream is.
-            let source = File::open(&paths.data);
+            let source = open_read(&paths.data);
             let source = match source {
                 Ok(file) => Some(file),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,

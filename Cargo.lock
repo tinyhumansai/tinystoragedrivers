@@ -389,6 +389,7 @@ name = "tinystoragedrivers-file"
 version = "0.2.1"
 dependencies = [
  "async-trait",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

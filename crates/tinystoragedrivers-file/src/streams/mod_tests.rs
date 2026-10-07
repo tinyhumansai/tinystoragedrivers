@@ -206,18 +206,44 @@ async fn a_new_stream_ignores_an_orphaned_data_file() {
     assert_eq!(streams.len("s").await.unwrap(), 1);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[tokio::test]
-async fn a_failed_append_leaves_nothing_behind() {
-    let (_dir, storage, streams) = open();
+async fn a_symlinked_data_file_is_refused_not_followed() {
+    let (dir, storage, streams) = open();
     let (data, _) = files(&storage, "s");
     std::fs::create_dir_all(data.parent().unwrap()).unwrap();
-    // Every write to /dev/full fails with "no space left on device".
-    std::os::unix::fs::symlink("/dev/full", &data).unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "{\"offset\":0,\"value\":\"secret\"}\n").unwrap();
+    std::os::unix::fs::symlink(&victim, &data).unwrap();
+    // Appending must neither write through the link nor truncate its target,
+    // and a failed append leaves no stream behind.
     assert_eq!(
         streams.append("s", json!(1)).await.unwrap_err().kind(),
         ErrorKind::Backend
     );
+    assert_eq!(
+        std::fs::read_to_string(&victim).unwrap(),
+        "{\"offset\":0,\"value\":\"secret\"}\n"
+    );
     assert_eq!(streams.len("s").await.unwrap(), 0);
     assert_eq!(streams.streams("").await.unwrap().len(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reads_and_truncation_refuse_a_symlinked_data_file() {
+    let (dir, storage, streams) = open();
+    streams.append("s", json!(1)).await.unwrap();
+    streams.append("s", json!(2)).await.unwrap();
+    let (data, _) = files(&storage, "s");
+    let victim = dir.path().join("victim");
+    std::fs::rename(&data, &victim).unwrap();
+    std::os::unix::fs::symlink(&victim, &data).unwrap();
+    for error in [
+        streams.len("s").await.unwrap_err(),
+        streams.read_window("s", 0, 10).await.unwrap_err(),
+        streams.truncate_before("s", 1).await.unwrap_err(),
+    ] {
+        assert_eq!(error.kind(), ErrorKind::Backend);
+    }
 }

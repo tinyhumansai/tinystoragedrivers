@@ -23,6 +23,10 @@ serde_json = { workspace = true }
 # never stalled by disk latency.
 tokio = { workspace = true }
 
+# `O_NOFOLLOW`, so stream and document files are never opened through a symlink.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # The conformance suite every driver runs.
 tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
