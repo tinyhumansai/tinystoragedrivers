@@ -33,7 +33,7 @@
 //! use tinystoragedrivers_secrets::{DerivedKeys, DocumentSecrets, SecretStore, crypto};
 //!
 //! let storage = MemoryStorage::new().for_scope(&Scope::new("tenant-a")?)?;
-//! let keys = Arc::new(DerivedKeys::new(crypto::generate_key()));
+//! let keys = Arc::new(DerivedKeys::new(crypto::generate_key()?));
 //! let secrets = DocumentSecrets::new(&storage, keys);
 //!
 //! secrets.set("openai:api_key", b"sk-live-123").await?;

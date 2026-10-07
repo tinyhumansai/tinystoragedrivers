@@ -16,6 +16,7 @@
 //! wrappers; what an error *means* is decided in [`map_keyring_error`].
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
@@ -24,6 +25,7 @@ use tinystoragedrivers_core::{Result, StorageError};
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, KEY_LEN, key_from_hex, key_to_hex};
+use crate::file::lock_file;
 use crate::store::{SecretStore, require_utf8, validate_name, validate_prefix};
 use crate::task::run_blocking;
 
@@ -48,6 +50,7 @@ static KEY_INIT: Mutex<()> = Mutex::new(());
 pub struct KeyringSecrets {
     service: Arc<str>,
     builder: Option<Arc<CredentialBuilder>>,
+    creation_lock: Option<Arc<Path>>,
 }
 
 impl KeyringSecrets {
@@ -58,6 +61,7 @@ impl KeyringSecrets {
         Self {
             service: Arc::from(service.as_ref()),
             builder: None,
+            creation_lock: None,
         }
     }
 
@@ -71,7 +75,18 @@ impl KeyringSecrets {
         Self {
             service: Arc::from(service.as_ref()),
             builder: Some(Arc::from(builder)),
+            creation_lock: None,
         }
+    }
+
+    /// Serialize [`KeyringSecrets::load_or_create_key`] across processes with
+    /// an exclusive advisory lock on `path` (created if absent), for example
+    /// `<workspace>/keyring.lock`. Every process that may create the key must
+    /// name the same file.
+    #[must_use]
+    pub fn with_key_creation_lock(mut self, path: impl Into<PathBuf>) -> Self {
+        self.creation_lock = Some(Arc::from(path.into()));
+        self
     }
 
     /// The service name every credential is stored under.
@@ -90,10 +105,11 @@ impl KeyringSecrets {
     /// is returned.
     ///
     /// Concurrent calls in one process are serialized, so they all return the
-    /// same key. The OS stores offer no create-if-absent, so two *processes*
-    /// creating the same key at the same moment can still race; the read-back
-    /// turns the loser's overwritten write into an error rather than a silent
-    /// wrong key, but a host should create the key from one process at boot.
+    /// same key. The OS stores offer no create-if-absent, so serializing
+    /// *processes* needs a shared lock file: configure one with
+    /// [`KeyringSecrets::with_key_creation_lock`]. Without it, two processes
+    /// creating the same key at the same moment can each return a different
+    /// key, so then create it from one process at boot.
     ///
     /// # Errors
     ///
@@ -107,11 +123,12 @@ impl KeyringSecrets {
         let name = name.to_string();
         run_blocking(move || {
             let _serialized = KEY_INIT.lock().unwrap_or_else(PoisonError::into_inner);
+            let _cross_process = this.creation_lock.as_deref().map(lock_file).transpose()?;
             let entry = this.entry(&name)?;
             match entry.get_password() {
                 Ok(hex) => key_from_hex(&Zeroizing::new(hex)),
                 Err(keyring::Error::NoEntry) => {
-                    let key = crypto::generate_key();
+                    let key = crypto::generate_key()?;
                     let hex = key_to_hex(&key);
                     entry.set_password(&hex).map_err(map_keyring_error)?;
                     let stored = Zeroizing::new(entry.get_password().map_err(map_keyring_error)?);
@@ -144,6 +161,7 @@ impl fmt::Debug for KeyringSecrets {
         f.debug_struct("KeyringSecrets")
             .field("service", &self.service)
             .field("custom_builder", &self.builder.is_some())
+            .field("creation_lock", &self.creation_lock)
             .finish()
     }
 }

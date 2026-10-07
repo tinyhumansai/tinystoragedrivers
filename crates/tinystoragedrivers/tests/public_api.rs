@@ -21,8 +21,10 @@ async fn the_secrets_feature_re_exports_the_secret_store_drivers() {
         .await
         .unwrap();
     let storage = backend.for_scope(&Scope::local()).unwrap();
-    let secrets =
-        DocumentSecrets::new(&storage, Arc::new(DerivedKeys::new(crypto::generate_key())));
+    let secrets = DocumentSecrets::new(
+        &storage,
+        Arc::new(DerivedKeys::new(crypto::generate_key().unwrap())),
+    );
     secrets.set("api_key", b"sk-live").await.unwrap();
     assert_eq!(
         secrets.get("api_key").await.unwrap().unwrap().as_slice(),

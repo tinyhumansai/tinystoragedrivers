@@ -9,7 +9,7 @@ use crate::keys::{DerivedKeys, StaticKey};
 use crate::testkit::secrets_conformance;
 
 fn derived() -> Arc<dyn KeyProvider> {
-    Arc::new(DerivedKeys::new(crypto::generate_key()))
+    Arc::new(DerivedKeys::new(crypto::generate_key().unwrap()))
 }
 
 #[tokio::test]

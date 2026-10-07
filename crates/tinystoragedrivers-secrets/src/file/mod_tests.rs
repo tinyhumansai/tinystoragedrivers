@@ -56,7 +56,7 @@ fn make_writable(dir: &Path) {
 #[tokio::test]
 async fn passes_the_secrets_conformance_suite() {
     let dir = TempDir::new("conformance");
-    let store = EncryptedFileSecrets::new(&dir.0, crypto::generate_key());
+    let store = EncryptedFileSecrets::new(&dir.0, crypto::generate_key().unwrap());
     secrets_conformance(&store).await;
     assert_eq!(store.backend_name(), "encrypted_file");
     assert_eq!(store.path(), dir.0.join("secrets.enc"));
@@ -107,7 +107,7 @@ async fn opens_a_secrets_enc_file_openhuman_wrote() {
 async fn the_written_file_is_owner_only() {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new("perms");
-    let store = EncryptedFileSecrets::new(&dir.0, crypto::generate_key());
+    let store = EncryptedFileSecrets::new(&dir.0, crypto::generate_key().unwrap());
     store.set("a", b"1").await.unwrap();
     let mode = fs::metadata(store.path()).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
@@ -117,7 +117,7 @@ async fn the_written_file_is_owner_only() {
 #[tokio::test]
 async fn a_missing_or_empty_file_is_an_empty_store() {
     let dir = TempDir::new("empty");
-    let store = EncryptedFileSecrets::new(dir.0.join("nested"), crypto::generate_key());
+    let store = EncryptedFileSecrets::new(dir.0.join("nested"), crypto::generate_key().unwrap());
     assert_eq!(store.list("").await.unwrap(), Vec::<String>::new());
     fs::create_dir_all(dir.0.join("nested")).unwrap();
     fs::write(store.path(), b"").unwrap();
@@ -127,7 +127,7 @@ async fn a_missing_or_empty_file_is_an_empty_store() {
 #[tokio::test]
 async fn binary_values_are_rejected() {
     let dir = TempDir::new("binary");
-    let store = EncryptedFileSecrets::new(&dir.0, crypto::generate_key());
+    let store = EncryptedFileSecrets::new(&dir.0, crypto::generate_key().unwrap());
     let error = store.set("bin", &[0xff, 0x00]).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
     assert!(!store.path().exists());
@@ -136,11 +136,11 @@ async fn binary_values_are_rejected() {
 #[tokio::test]
 async fn a_wrong_key_fails_closed_and_leaves_the_file_alone() {
     let dir = TempDir::new("wrong-key");
-    let writer = EncryptedFileSecrets::new(&dir.0, crypto::generate_key());
+    let writer = EncryptedFileSecrets::new(&dir.0, crypto::generate_key().unwrap());
     writer.set("keep", b"me").await.unwrap();
     let before = fs::read(writer.path()).unwrap();
 
-    let reader = EncryptedFileSecrets::new(&dir.0, crypto::generate_key());
+    let reader = EncryptedFileSecrets::new(&dir.0, crypto::generate_key().unwrap());
     assert_eq!(
         reader.get("keep").await.unwrap_err().kind(),
         ErrorKind::Crypto
@@ -159,7 +159,7 @@ async fn a_wrong_key_fails_closed_and_leaves_the_file_alone() {
 #[tokio::test]
 async fn decrypted_garbage_is_a_serialization_error_without_plaintext() {
     let dir = TempDir::new("garbage");
-    let key = crypto::generate_key();
+    let key = crypto::generate_key().unwrap();
     let path = dir.0.join("secrets.enc");
     fs::write(&path, crypto::encrypt(&key, b"[\"sk-leak\"]").unwrap()).unwrap();
     let store = EncryptedFileSecrets::at_path(&path, key);
@@ -174,7 +174,7 @@ async fn an_unreadable_path_is_a_backend_error() {
     let dir = TempDir::new("unreadable");
     // The "file" is a directory: reading it fails with something other than
     // NotFound.
-    let store = EncryptedFileSecrets::at_path(&dir.0, crypto::generate_key());
+    let store = EncryptedFileSecrets::at_path(&dir.0, crypto::generate_key().unwrap());
     assert_eq!(store.get("a").await.unwrap_err().kind(), ErrorKind::Backend);
 }
 
@@ -183,7 +183,7 @@ async fn a_parent_that_is_a_file_fails_the_lock() {
     let dir = TempDir::new("parent-file");
     let blocker = dir.0.join("blocker");
     fs::write(&blocker, b"").unwrap();
-    let store = EncryptedFileSecrets::new(&blocker, crypto::generate_key());
+    let store = EncryptedFileSecrets::new(&blocker, crypto::generate_key().unwrap());
     assert_eq!(
         store.set("a", b"1").await.unwrap_err().kind(),
         ErrorKind::Backend
@@ -194,7 +194,7 @@ async fn a_parent_that_is_a_file_fails_the_lock() {
 #[tokio::test]
 async fn an_unwritable_directory_fails_the_lock_open() {
     let dir = TempDir::new("readonly");
-    let store = EncryptedFileSecrets::new(&dir.0, crypto::generate_key());
+    let store = EncryptedFileSecrets::new(&dir.0, crypto::generate_key().unwrap());
     if !make_readonly(&dir.0) {
         return;
     }
@@ -264,7 +264,7 @@ fn a_key_published_concurrently_wins_and_the_temp_file_goes() {
     let dir = TempDir::new("key-race");
     let path = dir.0.join(".secret_key");
     fs::write(&path, crate::crypto::tests::FIXTURE_KEY_HEX).unwrap();
-    let loser = crypto::generate_key();
+    let loser = crypto::generate_key().unwrap();
     let tmp = stage(&path, key_to_hex(&loser).as_bytes(), &mut next_temp_seq).unwrap();
     let adopted = publish_key(&tmp, &path, loser).unwrap();
     assert_eq!(*adopted, *fixture_key());
@@ -279,7 +279,7 @@ fn a_key_that_cannot_be_published_is_a_backend_error() {
     let error = publish_key(
         &tmp,
         &dir.0.join("missing/.secret_key"),
-        crypto::generate_key(),
+        crypto::generate_key().unwrap(),
     )
     .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Backend);

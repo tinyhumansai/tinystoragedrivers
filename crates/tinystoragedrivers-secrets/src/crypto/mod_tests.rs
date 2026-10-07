@@ -60,7 +60,7 @@ fn enc2_is_prefix_then_lowercase_hex_of_nonce_ciphertext_tag() {
 
 #[test]
 fn every_encryption_uses_a_fresh_nonce() {
-    let key = generate_key();
+    let key = generate_key().unwrap();
     let a = encrypt(&key, b"same").unwrap();
     let b = encrypt(&key, b"same").unwrap();
     assert_ne!(a[..NONCE_LEN], b[..NONCE_LEN]);
@@ -69,7 +69,7 @@ fn every_encryption_uses_a_fresh_nonce() {
 
 #[test]
 fn an_empty_plaintext_round_trips() {
-    let key = generate_key();
+    let key = generate_key().unwrap();
     let value = encrypt_enc2(&key, b"").unwrap();
     assert!(decrypt_enc2(&key, &value).unwrap().is_empty());
 }
@@ -88,7 +88,7 @@ fn uppercase_hex_decrypts_like_lowercase() {
 
 #[test]
 fn a_wrong_key_or_tampering_is_a_crypto_error() {
-    let wrong = generate_key();
+    let wrong = generate_key().unwrap();
     let error = decrypt_enc2(&wrong, OPENHUMAN_ENC2).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Crypto);
 
@@ -150,7 +150,7 @@ fn legacy_enc_values_decode_with_repeating_key_xor() {
 
 #[test]
 fn keys_round_trip_through_hex_and_reject_bad_lengths() {
-    let key = generate_key();
+    let key = generate_key().unwrap();
     let hex = key_to_hex(&key);
     assert_eq!(hex.len(), 64);
     assert_eq!(*key_from_hex(&format!("  {}\n", *hex)).unwrap(), *key);

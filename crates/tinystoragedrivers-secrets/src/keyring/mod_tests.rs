@@ -244,6 +244,36 @@ async fn concurrent_key_creation_agrees_on_one_key() {
 }
 
 #[tokio::test]
+async fn a_creation_lock_file_serializes_across_processes() {
+    let dir = std::env::temp_dir().join(format!("tsd-keyring-lock-{}", std::process::id()));
+    let (secrets, _) = fake(Fault::None);
+    let secrets = secrets.with_key_creation_lock(dir.join("keyring.lock"));
+    let key = secrets.load_or_create_key("app:locked").await.unwrap();
+    assert_eq!(
+        *secrets.load_or_create_key("app:locked").await.unwrap(),
+        *key
+    );
+    assert!(dir.join("keyring.lock").exists());
+    assert!(format!("{secrets:?}").contains("keyring.lock"));
+
+    // A lock that cannot be taken fails the call before anything is written.
+    let not_a_dir = dir.join("not-a-dir");
+    std::fs::write(&not_a_dir, b"").unwrap();
+    let (unlockable, store) = fake(Fault::None);
+    let unlockable = unlockable.with_key_creation_lock(not_a_dir.join("keyring.lock"));
+    assert_eq!(
+        unlockable
+            .load_or_create_key("app:x")
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Backend
+    );
+    assert!(store.lock().unwrap().is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn load_or_create_key_reads_openhumans_hex_master_key() {
     let (secrets, store) = fake(Fault::None);
     store.lock().unwrap().insert(
@@ -338,7 +368,7 @@ fn debug_shows_service_only() {
     let (secrets, _) = fake(Fault::None);
     assert_eq!(
         format!("{secrets:?}"),
-        "KeyringSecrets { service: \"tsd-test\", custom_builder: true }"
+        "KeyringSecrets { service: \"tsd-test\", custom_builder: true, creation_lock: None }"
     );
     let default = KeyringSecrets::new("svc");
     assert!(format!("{default:?}").contains("custom_builder: false"));

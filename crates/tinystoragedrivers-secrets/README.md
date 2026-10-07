@@ -1,5 +1,8 @@
 # tinystoragedrivers-secrets
 
+The contract is specified in
+[`docs/specs/secret-storage.md`](../../docs/specs/secret-storage.md).
+
 Encrypted secret storage for OpenHuman: one `SecretStore` port (`get`, `set`,
 `delete`, `list`), with drivers for each place a secret can live. Desktop and
 cloud builds share the port and the byte formats.
@@ -53,7 +56,8 @@ on every call:
   `ErrorKind::Backend`). A locked store is `ErrorKind::Unavailable`.
   `load_or_create_key` creates a key only when the entry is genuinely absent,
   and serializes creation within the process. The OS stores have no
-  create-if-absent, so create the key from one process at boot.
+  create-if-absent, so `with_key_creation_lock(path)` serializes it across
+  processes through a shared lock file.
 - `load_or_create_key_file` writes and syncs a temp sibling, then publishes it
   with a hard link that fails if the key file exists. Readers never see a
   partial key, and racing creators adopt the winner's key.

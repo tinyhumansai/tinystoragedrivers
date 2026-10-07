@@ -59,7 +59,7 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// use tinystoragedrivers_secrets::{EncryptedFileSecrets, SecretStore, crypto};
 ///
 /// let dir = std::env::temp_dir().join(format!("tsd-doc-{}", std::process::id()));
-/// let secrets = EncryptedFileSecrets::new(&dir, crypto::generate_key());
+/// let secrets = EncryptedFileSecrets::new(&dir, crypto::generate_key()?);
 /// secrets.set("alice:api_key", b"sk-live-abc").await?;
 /// assert!(dir.join("secrets.enc").exists());
 /// # std::fs::remove_dir_all(&dir).unwrap();
@@ -235,18 +235,24 @@ impl Inner {
     fn lock(&self) -> Result<File> {
         let mut name = self.path.file_name().unwrap_or_default().to_os_string();
         name.push(".lock");
-        let lock_path = self.path.with_file_name(name);
-        create_parent(&lock_path)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|e| io_error("open the secrets lock file", e))?;
-        fs4::FileExt::lock(&file).map_err(|e| io_error("lock the secrets file", e))?;
-        Ok(file)
+        lock_file(&self.path.with_file_name(name))
     }
+}
+
+/// Take an exclusive advisory lock on `lock_path` (created if absent), held
+/// until the returned file is dropped. The same `flock`/`LockFileEx` lock
+/// OpenHuman's `fs2` lock takes.
+pub(crate) fn lock_file(lock_path: &Path) -> Result<File> {
+    create_parent(lock_path)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|e| io_error("open the lock file", e))?;
+    fs4::FileExt::lock(&file).map_err(|e| io_error("take the lock", e))?;
+    Ok(file)
 }
 
 fn create_parent(path: &Path) -> Result<()> {
@@ -341,7 +347,7 @@ pub fn load_or_create_key_file(path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>> 
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         other => return parse_key_file(other),
     }
-    let key = crypto::generate_key();
+    let key = crypto::generate_key()?;
     let tmp_path = stage(path, key_to_hex(&key).as_bytes(), &mut next_temp_seq)?;
     publish_key(&tmp_path, path, key)
 }
