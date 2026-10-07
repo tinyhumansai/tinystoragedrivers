@@ -50,9 +50,15 @@ pub(crate) fn load_spec(
 
 /// Merge `spec` into the stored declaration, create its indexes, and
 /// rebuild the search index if the searchable fields changed.
-pub(crate) fn declare(conn: &Connection, tables: &Tables, spec: &CollectionSpec) -> Result<()> {
+pub(crate) fn declare(
+    conn: &Connection,
+    tables: &Tables,
+    spec: &CollectionSpec,
+    now_ms: u64,
+) -> Result<()> {
     let existing = load_spec(conn, tables, &spec.name)?;
     let merged = existing.merge(spec)?;
+    check_existing_unique(conn, tables, &existing, &merged, now_ms)?;
     let sql = format!(
         "INSERT INTO {} (coll, spec) VALUES (?1, ?2)
          ON CONFLICT (coll) DO UPDATE SET spec = excluded.spec",
@@ -80,6 +86,70 @@ pub(crate) fn declare(conn: &Connection, tables: &Tables, spec: &CollectionSpec)
     }
     if existing.search != merged.search {
         reindex(conn, tables, &merged)?;
+    }
+    Ok(())
+}
+
+/// Refuse newly declared unique indexes that the stored live documents
+/// already violate, in any scope.
+fn check_existing_unique(
+    conn: &Connection,
+    tables: &Tables,
+    existing: &CollectionSpec,
+    merged: &CollectionSpec,
+    now_ms: u64,
+) -> Result<()> {
+    let added: Vec<_> = merged
+        .indexes
+        .iter()
+        .filter(|index| index.unique && !existing.indexes.contains(index))
+        .collect();
+    if added.is_empty() {
+        return Ok(());
+    }
+    let sql = format!(
+        "SELECT scope, doc FROM {} WHERE coll = ?1",
+        ident(&tables.docs)
+    );
+    let mut statement = conn.prepare(&sql).map_err(during("check unique"))?;
+    let rows: Vec<(String, String)> = statement
+        .query_map([&merged.name], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(during("check unique"))?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(during("check unique"))?;
+    let mut docs = Vec::with_capacity(rows.len());
+    for (scope, doc) in rows {
+        let doc: Value = serde_json::from_str(&doc)?;
+        if !expired(merged, &doc, now_ms) {
+            docs.push((scope, doc));
+        }
+    }
+    for index in added {
+        let mut keys: Vec<(String, Vec<Value>)> = docs
+            .iter()
+            .filter_map(|(scope, doc)| {
+                let key = index
+                    .fields
+                    .iter()
+                    .map(|field| value::lookup(doc, field).cloned())
+                    .collect::<Option<Vec<Value>>>()?;
+                Some((scope.clone(), key))
+            })
+            .collect();
+        let order = |a: &(String, Vec<Value>), b: &(String, Vec<Value>)| {
+            a.0.cmp(&b.0).then_with(|| {
+                value::compare(&Value::Array(a.1.clone()), &Value::Array(b.1.clone()))
+            })
+        };
+        keys.sort_by(order);
+        if keys
+            .windows(2)
+            .any(|pair| order(&pair[0], &pair[1]).is_eq())
+        {
+            return Err(StorageError::already_exists(
+                "stored documents already violate this unique index",
+            ));
+        }
     }
     Ok(())
 }
@@ -328,10 +398,13 @@ pub(crate) fn put(
     check_unique(conn, ctx, &spec, id, doc)?;
     // Versions keep rising across expiry, so a stale CAS on a re-created
     // document still fails.
-    let version = match &previous {
+    let last = match &previous {
+        Some(found) => Some(found.version),
+        None => buried_version(conn, ctx, collection, id)?,
+    };
+    let version = match last {
         None => Version::FIRST,
-        Some(found) => found
-            .version
+        Some(last) => last
             .next()
             .filter(|next| next.0 <= MAX_STORED_VERSION)
             .ok_or_else(|| StorageError::backend("document version space is exhausted"))?,
@@ -359,6 +432,50 @@ pub(crate) fn put(
     Ok(version)
 }
 
+/// The version a removed document last had, if any.
+fn buried_version(
+    conn: &Connection,
+    ctx: Ctx<'_>,
+    collection: &str,
+    id: &str,
+) -> Result<Option<Version>> {
+    let sql = format!(
+        "SELECT version FROM {} WHERE scope = ?1 AND coll = ?2 AND id = ?3",
+        ident(&ctx.tables.tombstones)
+    );
+    let found: Option<i64> = conn
+        .query_row(&sql, params![ctx.scope, collection, id], |row| row.get(0))
+        .optional()
+        .map_err(during("read tombstone"))?;
+    Ok(found.map(to_version))
+}
+
+/// Delete one document (or, with `id` unset, every document of the
+/// collection in this scope), remembering each one's version so the id never
+/// reuses it.
+fn bury(conn: &Connection, ctx: Ctx<'_>, collection: &str, id: Option<&str>) -> Result<()> {
+    let which = if id.is_some() { " AND id = ?3" } else { "" };
+    let remember = format!(
+        "INSERT INTO {tombstones} (scope, coll, id, version)
+         SELECT scope, coll, id, version FROM {docs} WHERE scope = ?1 AND coll = ?2{which}
+         ON CONFLICT (scope, coll, id) DO UPDATE SET version = excluded.version",
+        tombstones = ident(&ctx.tables.tombstones),
+        docs = ident(&ctx.tables.docs),
+    );
+    let remove = format!(
+        "DELETE FROM {} WHERE scope = ?1 AND coll = ?2{which}",
+        ident(&ctx.tables.docs)
+    );
+    for sql in [remember, remove] {
+        match id {
+            Some(id) => conn.execute(&sql, params![ctx.scope, collection, id]),
+            None => conn.execute(&sql, params![ctx.scope, collection]),
+        }
+        .map_err(during("delete"))?;
+    }
+    Ok(())
+}
+
 /// Remove one document under `precondition`; report whether a live one went.
 pub(crate) fn delete(
     conn: &Connection,
@@ -369,12 +486,7 @@ pub(crate) fn delete(
 ) -> Result<bool> {
     let current = get(conn, ctx, collection, id)?;
     check(precondition, current.as_ref())?;
-    let sql = format!(
-        "DELETE FROM {} WHERE scope = ?1 AND coll = ?2 AND id = ?3",
-        ident(&ctx.tables.docs)
-    );
-    conn.execute(&sql, params![ctx.scope, collection, id])
-        .map_err(during("delete"))?;
+    bury(conn, ctx, collection, Some(id))?;
     unindex_text(conn, ctx, collection, Some(id))?;
     Ok(current.is_some())
 }
@@ -396,12 +508,7 @@ pub(crate) fn delete_where(
 /// Remove every document of the collection in this scope.
 pub(crate) fn drop_collection(conn: &Connection, ctx: Ctx<'_>, collection: &str) -> Result<()> {
     validate_collection(collection)?;
-    let sql = format!(
-        "DELETE FROM {} WHERE scope = ?1 AND coll = ?2",
-        ident(&ctx.tables.docs)
-    );
-    conn.execute(&sql, params![ctx.scope, collection])
-        .map_err(during("drop collection"))?;
+    bury(conn, ctx, collection, None)?;
     unindex_text(conn, ctx, collection, None)
 }
 

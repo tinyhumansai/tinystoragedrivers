@@ -63,6 +63,7 @@ fn declaring_search_later_indexes_existing_documents() {
         &conn,
         &tables,
         &CollectionSpec::new("notes").searchable(["t"]),
+        0,
     )
     .unwrap();
     let hits = search(&conn, ctx(&tables), "notes", "hello", 5).unwrap();
@@ -81,6 +82,7 @@ fn declaring_search_later_indexes_existing_documents() {
         &conn,
         &tables,
         &CollectionSpec::new("notes").index(IndexSpec::new("by_t", ["t"])),
+        0,
     )
     .unwrap();
 }
@@ -88,7 +90,13 @@ fn declaring_search_later_indexes_existing_documents() {
 #[test]
 fn search_limits_and_scores_are_ordered() {
     let (conn, tables) = setup();
-    declare(&conn, &tables, &CollectionSpec::new("n").searchable(["t"])).unwrap();
+    declare(
+        &conn,
+        &tables,
+        &CollectionSpec::new("n").searchable(["t"]),
+        0,
+    )
+    .unwrap();
     for (id, text) in [("a", "cat"), ("b", "cat cat dog"), ("c", "cat")] {
         put(
             &conn,
@@ -142,4 +150,110 @@ fn missing_tables_are_backend_errors() {
     let tables = Tables::new("absent");
     let error = get(&conn, ctx(&tables), "c", "a").unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Backend);
+}
+
+#[test]
+fn versions_survive_deletion_and_drops() {
+    let (conn, tables) = setup();
+    let v1 = put(
+        &conn,
+        ctx(&tables),
+        "c",
+        "a",
+        &json!({}),
+        Precondition::None,
+    )
+    .unwrap();
+    assert!(delete(&conn, ctx(&tables), "c", "a", Precondition::None).unwrap());
+    let v2 = put(
+        &conn,
+        ctx(&tables),
+        "c",
+        "a",
+        &json!({}),
+        Precondition::Absent,
+    )
+    .unwrap();
+    assert!(v2 > v1);
+    drop_collection(&conn, ctx(&tables), "c").unwrap();
+    let v3 = put(
+        &conn,
+        ctx(&tables),
+        "c",
+        "a",
+        &json!({}),
+        Precondition::Absent,
+    )
+    .unwrap();
+    assert!(v3 > v2);
+    assert_eq!(
+        buried_version(&conn, ctx(&tables), "c", "zz").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn late_unique_indexes_are_checked_per_scope() {
+    let (conn, tables) = setup();
+    let other = Ctx {
+        scope: "other",
+        ..ctx(&tables)
+    };
+    put(
+        &conn,
+        ctx(&tables),
+        "u",
+        "a",
+        &json!({"e": "x"}),
+        Precondition::None,
+    )
+    .unwrap();
+    put(
+        &conn,
+        other,
+        "u",
+        "b",
+        &json!({"e": "x"}),
+        Precondition::None,
+    )
+    .unwrap();
+    put(
+        &conn,
+        ctx(&tables),
+        "u",
+        "c",
+        &json!({}),
+        Precondition::None,
+    )
+    .unwrap();
+    let unique = CollectionSpec::new("u").index(IndexSpec::new("by_e", ["e"]).unique());
+    declare(&conn, &tables, &unique, 0).unwrap();
+    declare(&conn, &tables, &unique, 0).unwrap();
+    put(
+        &conn,
+        ctx(&tables),
+        "w",
+        "a",
+        &json!({"e": 1}),
+        Precondition::None,
+    )
+    .unwrap();
+    put(
+        &conn,
+        ctx(&tables),
+        "w",
+        "b",
+        &json!({"e": 1.0}),
+        Precondition::None,
+    )
+    .unwrap();
+    let error = declare(
+        &conn,
+        &tables,
+        &CollectionSpec::new("w").index(IndexSpec::new("by_e", ["e"]).unique()),
+        0,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    assert_eq!(load_spec(&conn, &tables, "w").unwrap().indexes.len(), 0);
 }

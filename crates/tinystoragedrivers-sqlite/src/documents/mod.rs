@@ -129,8 +129,10 @@ impl DocumentStore for SqliteDocuments {
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
         spec.validate()?;
         let spec = spec.clone();
-        self.with(true, move |conn, ctx| ops::declare(conn, ctx.tables, &spec))
-            .await
+        self.with(true, move |conn, ctx| {
+            ops::declare(conn, ctx.tables, &spec, ctx.now_ms)
+        })
+        .await
     }
 
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {

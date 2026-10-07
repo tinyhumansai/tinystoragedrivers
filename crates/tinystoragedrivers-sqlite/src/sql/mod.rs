@@ -42,6 +42,8 @@ pub(crate) struct Tables {
     pub(crate) streams: String,
     pub(crate) stream_meta: String,
     pub(crate) blobs: String,
+    /// The last version of removed documents, so an id never reuses one.
+    pub(crate) tombstones: String,
     /// Prefix used for index names.
     pub(crate) prefix: String,
 }
@@ -58,6 +60,7 @@ impl Tables {
             streams: name("streams"),
             stream_meta: name("stream_meta"),
             blobs: name("blobs"),
+            tombstones: name("tombstones"),
             prefix: prefix.to_owned(),
         }
     }
@@ -101,6 +104,13 @@ impl Tables {
                  content_type TEXT,
                  bytes BLOB NOT NULL,
                  PRIMARY KEY (scope, key)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS {tombstones} (
+                 scope TEXT NOT NULL,
+                 coll TEXT NOT NULL,
+                 id TEXT NOT NULL,
+                 version INTEGER NOT NULL,
+                 PRIMARY KEY (scope, coll, id)
              ) WITHOUT ROWID;",
             docs = ident(&self.docs),
             specs = ident(&self.specs),
@@ -108,6 +118,7 @@ impl Tables {
             streams = ident(&self.streams),
             stream_meta = ident(&self.stream_meta),
             blobs = ident(&self.blobs),
+            tombstones = ident(&self.tombstones),
         );
         conn.execute_batch(&sql).map_err(during("create tables"))
     }

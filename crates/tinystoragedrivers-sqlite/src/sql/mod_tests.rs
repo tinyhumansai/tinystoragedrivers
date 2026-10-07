@@ -45,6 +45,6 @@ fn creates_prefixed_tables_idempotently() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(count, 6);
+    assert_eq!(count, 7);
     assert_eq!(Tables::new("").prefix, "");
 }
