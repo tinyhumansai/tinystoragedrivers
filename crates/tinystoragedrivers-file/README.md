@@ -47,6 +47,12 @@ distinct on case-insensitive filesystems (macOS, Windows), never contains `.`
   derived from `base` and the last complete line, never stored separately.
 - `truncate_before` raises `base` first, then rewrites the file; a crash in
   between leaves lines below `base`, which readers skip.
+- Deleting a document (`delete`, `delete_where`, `drop_collection`) replaces
+  its file with a tombstone, `{"id", "version"}` without `doc`, in one rename.
+  A recreated id continues from its last version, so a compare-and-swap
+  prepared before the deletion fails. Tombstones are never pruned.
+- `ensure_collection` refuses (`AlreadyExists`, nothing written) a unique index
+  that stored documents in any scope already violate.
 - A blob's sidecar decides existence: put writes the bytes then the sidecar,
   delete removes the sidecar first.
 

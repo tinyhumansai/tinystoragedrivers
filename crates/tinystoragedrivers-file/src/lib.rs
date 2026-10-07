@@ -3,7 +3,9 @@
 //! [`FileStorage`] keeps every record as an ordinary file under one directory,
 //! so the data stays human-inspectable and easy to back up or diff:
 //!
-//! - documents: one pretty-printed JSON file each, `{"id", "version", "doc"}`;
+//! - documents: one pretty-printed JSON file each, `{"id", "version", "doc"}`
+//!   (a deleted document leaves a `{"id", "version"}` tombstone so its id never
+//!   reuses a version);
 //! - streams: one JSONL file each, a `{"offset", "value"}` line per entry;
 //! - blobs: the raw bytes, with a small JSON sidecar for the content type.
 //!

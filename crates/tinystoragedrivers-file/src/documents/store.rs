@@ -1,11 +1,15 @@
 //! The document rules applied to files, run under the database lock.
 //!
 //! These mirror the memory driver's `DbState` one for one: expired documents
-//! stay on disk (so versions keep rising across expiry) but read as absent,
-//! and a delete removes the file (so a re-created document starts again at
-//! [`Version::FIRST`]).
+//! stay on disk (so versions keep rising across expiry) but read as absent.
+//!
+//! A delete (and `delete_where`, and `drop_collection`) does not remove the
+//! file: it replaces it with a tombstone, `{"id", "version"}` without a `doc`,
+//! in one atomic rename. A recreated id therefore continues from its last
+//! version, and a compare-and-swap prepared before the deletion fails, which
+//! is what the memory driver's tombstone map provides.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,11 +19,33 @@ use tinystoragedrivers_core::{
 };
 
 use crate::encode::{dir_components, file_stem};
-use crate::fsio::{files_with_suffix, read_json, remove_optional, write_json};
+use crate::fsio::{files_with_suffix, io_error, read_json, write_json};
 use crate::storage::Db;
 
-/// One document file.
+/// One document file: a live document, or a tombstone (no `doc`) that keeps
+/// a deleted id's last version.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Record {
+    id: String,
+    version: Version,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    doc: Option<Value>,
+}
+
+impl Record {
+    /// The stored document, unless it is a tombstone or has expired.
+    fn live(self, spec: &CollectionSpec, now_ms: u64) -> Option<StoredDoc> {
+        let doc = self.doc?;
+        (!expired(spec, &doc, now_ms)).then_some(StoredDoc {
+            id: self.id,
+            version: self.version,
+            doc,
+        })
+    }
+}
+
+/// A live document.
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct StoredDoc {
     pub(super) id: String,
     pub(super) version: Version,
@@ -83,48 +109,31 @@ impl Docs<'_> {
     pub(super) fn ensure(&self, spec: &CollectionSpec) -> Result<()> {
         spec.validate()?;
         let path = self.spec_path(&spec.name);
-        let merged = match read_json::<CollectionSpec>(&path)? {
-            Some(existing) if existing.name == spec.name => existing.merge(spec)?,
+        let (stored, merged) = match read_json::<CollectionSpec>(&path)? {
+            Some(existing) if existing.name == spec.name => {
+                let merged = existing.merge(spec)?;
+                (existing, merged)
+            }
             Some(_) => return Err(collision()),
-            None => spec.clone(),
+            None => (CollectionSpec::new(&spec.name), spec.clone()),
         };
+        self.check_existing_unique(&stored, &merged)?;
         write_json(&path, &merged)
     }
 
     /// The stored file for `id`, expired or not. `Err` when the file belongs
     /// to a different id (a hash collision).
-    fn stored(&self, collection: &str, id: &str) -> Result<Option<StoredDoc>> {
-        match read_json::<StoredDoc>(&self.doc_path(collection, id))? {
+    fn stored(&self, collection: &str, id: &str) -> Result<Option<Record>> {
+        match read_json::<Record>(&self.doc_path(collection, id))? {
             Some(stored) if stored.id == id => Ok(Some(stored)),
             Some(_) => Err(collision()),
             None => Ok(None),
         }
     }
 
-    fn expired(spec: &CollectionSpec, doc: &Value, now_ms: u64) -> bool {
-        spec.ttl_field
-            .as_deref()
-            .and_then(|field| value::lookup(doc, field))
-            .and_then(Value::as_f64)
-            .is_some_and(|expires| {
-                // Epoch milliseconds fit an f64 exactly until the year 287396.
-                #[allow(clippy::cast_precision_loss)]
-                let now = now_ms as f64;
-                expires <= now
-            })
-    }
-
     /// Every live (non-expired) document of a collection, in file order.
     pub(super) fn live(&self, spec: &CollectionSpec) -> Result<Vec<StoredDoc>> {
-        let mut out = Vec::new();
-        for path in files_with_suffix(&self.collection_dir(&spec.name), ".json")? {
-            if let Some(stored) = read_json::<StoredDoc>(&path)?
-                && !Self::expired(spec, &stored.doc, self.now)
-            {
-                out.push(stored);
-            }
-        }
-        Ok(out)
+        load_live(&self.collection_dir(&spec.name), spec, self.now)
     }
 
     /// Read one live document.
@@ -134,7 +143,7 @@ impl Docs<'_> {
         let spec = self.spec(collection)?;
         Ok(self
             .stored(collection, id)?
-            .filter(|stored| !Self::expired(&spec, &stored.doc, self.now))
+            .and_then(|record| record.live(&spec, self.now))
             .map(StoredDoc::versioned))
     }
 
@@ -152,12 +161,14 @@ impl Docs<'_> {
         let spec = self.spec(collection)?;
         let stored = self.stored(collection, id)?;
         let current = stored
-            .as_ref()
-            .filter(|stored| !Self::expired(&spec, &stored.doc, self.now));
+            .clone()
+            .and_then(|record| record.live(&spec, self.now));
         check(precondition, current.map(|stored| stored.version))?;
-        self.check_unique(&spec, id, &doc)?;
-        // Versions keep rising across expiry, so a stale CAS on a re-created
-        // document still fails.
+        if spec.indexes.iter().any(|index| index.unique) {
+            unique_clash(&spec, &self.live(&spec)?, id, &doc)?;
+        }
+        // Versions keep rising across expiry and deletion (tombstones), so a
+        // stale CAS on a re-created document still fails.
         let version = match &stored {
             None => Version::FIRST,
             Some(stored) => stored
@@ -165,10 +176,10 @@ impl Docs<'_> {
                 .next()
                 .ok_or_else(|| StorageError::backend("document version space is exhausted"))?,
         };
-        let record = StoredDoc {
+        let record = Record {
             id: id.to_owned(),
             version,
-            doc,
+            doc: Some(doc),
         };
         write_json(&self.doc_path(collection, id), &record)?;
         Ok(version)
@@ -187,41 +198,29 @@ impl Docs<'_> {
         let spec = self.spec(collection)?;
         let stored = self.stored(collection, id)?;
         let live = stored
-            .as_ref()
-            .filter(|stored| !Self::expired(&spec, &stored.doc, self.now))
+            .clone()
+            .and_then(|record| record.live(&spec, self.now))
             .map(|stored| stored.version);
         check(precondition, live)?;
         let removed = match stored {
-            Some(_) => remove_optional(&self.doc_path(collection, id))?,
+            Some(record) => self.bury(collection, record)?,
             None => false,
         };
         Ok(removed && live.is_some())
     }
 
-    fn check_unique(&self, spec: &CollectionSpec, id: &str, doc: &Value) -> Result<()> {
-        let unique: Vec<_> = spec.indexes.iter().filter(|index| index.unique).collect();
-        if unique.is_empty() {
-            return Ok(());
+    /// Replace a document file with its tombstone; report whether it held a
+    /// document (live or expired).
+    fn bury(&self, collection: &str, record: Record) -> Result<bool> {
+        if record.doc.is_none() {
+            return Ok(false);
         }
-        let others = self.live(spec)?;
-        for index in unique {
-            let Some(key) = index_key(&index.fields, doc) else {
-                continue;
-            };
-            let clash = others.iter().any(|other| {
-                other.id != id
-                    && index_key(&index.fields, &other.doc).is_some_and(|theirs| {
-                        theirs.iter().zip(&key).all(|(a, b)| value::equal(a, b))
-                    })
-            });
-            if clash {
-                return Err(StorageError::already_exists(format!(
-                    "unique index `{}` already holds this value",
-                    index.name
-                )));
-            }
-        }
-        Ok(())
+        let tombstone = Record {
+            doc: None,
+            ..record
+        };
+        write_json(&self.doc_path(collection, &tombstone.id), &tombstone)?;
+        Ok(true)
     }
 
     /// The live documents matching `filter`, in `sort` order.
@@ -247,25 +246,132 @@ impl Docs<'_> {
     /// Remove the live documents matching `filter`, returning how many.
     pub(super) fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
         let doomed = self.matching(collection, filter, &[])?;
-        for doc in &doomed {
-            remove_optional(&self.doc_path(collection, &doc.id))?;
+        for doc in doomed.iter().cloned() {
+            self.bury(
+                collection,
+                Record {
+                    id: doc.id,
+                    version: doc.version,
+                    doc: Some(doc.doc),
+                },
+            )?;
         }
         Ok(doomed.len() as u64)
     }
 
-    /// Remove every document file of the collection in this scope. Only the
-    /// files go: a collection directory can also hold the continuation
-    /// directories of longer collection names (see the `encode` module).
+    /// Replace every document of the collection in this scope, live or
+    /// expired, with its tombstone.
     pub(super) fn drop_collection(&self, collection: &str) -> Result<()> {
         validate_collection(collection)?;
-        let dir = self.collection_dir(collection);
-        for path in files_with_suffix(&dir, ".json")? {
-            remove_optional(&path)?;
+        for path in files_with_suffix(&self.collection_dir(collection), ".json")? {
+            if let Some(record) = read_json::<Record>(&path)? {
+                self.bury(collection, record)?;
+            }
         }
-        // Best effort: fails, harmlessly, when continuation directories remain.
-        let _ = std::fs::remove_dir(&dir);
         Ok(())
     }
+
+    /// Refuse a declaration whose unique indexes the stored documents of
+    /// this collection already violate, in any scope. Liveness follows the
+    /// declaration already stored, as in the memory driver.
+    fn check_existing_unique(
+        &self,
+        stored: &CollectionSpec,
+        merged: &CollectionSpec,
+    ) -> Result<()> {
+        if !merged.indexes.iter().any(|index| index.unique) {
+            return Ok(());
+        }
+        let components = dir_components(&merged.name);
+        for scope_dir in scope_dirs(&self.db.scopes_dir())? {
+            let docs = load_live(&scope_dir.join("docs").join(&components), stored, self.now)?;
+            for doc in &docs {
+                unique_clash(merged, &docs, &doc.id, &doc.doc)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether `doc` has passed its collection's expiry time.
+fn expired(spec: &CollectionSpec, doc: &Value, now_ms: u64) -> bool {
+    spec.ttl_field
+        .as_deref()
+        .and_then(|field| value::lookup(doc, field))
+        .and_then(Value::as_f64)
+        .is_some_and(|expires| {
+            // Epoch milliseconds fit an f64 exactly until the year 287396.
+            #[allow(clippy::cast_precision_loss)]
+            let now = now_ms as f64;
+            expires <= now
+        })
+}
+
+/// The live documents in one collection directory.
+fn load_live(dir: &Path, spec: &CollectionSpec, now_ms: u64) -> Result<Vec<StoredDoc>> {
+    let mut out = Vec::new();
+    for path in files_with_suffix(dir, ".json")? {
+        if let Some(stored) = read_json::<Record>(&path)?.and_then(|r| r.live(spec, now_ms)) {
+            out.push(stored);
+        }
+    }
+    Ok(out)
+}
+
+/// Every scope directory under `scopes`: a directory holding `docs`, found by
+/// walking the first-level chunks and their `+` continuations.
+fn scope_dirs(scopes: &Path) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let mut pending = subdirs(scopes, |_| true)?;
+    while let Some(dir) = pending.pop() {
+        if dir.join("docs").is_dir() {
+            found.push(dir.clone());
+        }
+        pending.extend(subdirs(&dir, |name| name.starts_with('+'))?);
+    }
+    Ok(found)
+}
+
+/// The subdirectories of `dir` whose names pass `keep`; none when `dir` is
+/// missing.
+fn subdirs(dir: &Path, keep: impl Fn(&str) -> bool) -> Result<Vec<PathBuf>> {
+    let read_error = io_error("list a directory");
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(read_error(error)),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(&read_error)?;
+        let is_dir = entry.file_type().map_err(&read_error)?.is_dir();
+        if is_dir && entry.file_name().to_str().is_some_and(&keep) {
+            out.push(entry.path());
+        }
+    }
+    Ok(out)
+}
+
+/// Fail with `AlreadyExists` when `doc` (stored as `id`) would share a unique
+/// index value with any other document in `others`.
+fn unique_clash(spec: &CollectionSpec, others: &[StoredDoc], id: &str, doc: &Value) -> Result<()> {
+    for index in spec.indexes.iter().filter(|index| index.unique) {
+        let Some(key) = index_key(&index.fields, doc) else {
+            continue;
+        };
+        let clash = others.iter().any(|other| {
+            other.id != id
+                && index_key(&index.fields, &other.doc)
+                    .is_some_and(|theirs| theirs.iter().zip(&key).all(|(a, b)| value::equal(a, b)))
+        });
+        if clash {
+            return Err(StorageError::already_exists(format!(
+                "unique index `{}` already holds this value",
+                index.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The values of `fields` in `doc`, or `None` when any is missing.

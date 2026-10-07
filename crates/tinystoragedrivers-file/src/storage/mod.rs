@@ -102,9 +102,14 @@ impl Db {
         self.dir.join("_meta").join("collections")
     }
 
+    /// The directory holding every scope's data.
+    pub(crate) fn scopes_dir(&self) -> PathBuf {
+        self.dir.join("scopes")
+    }
+
     /// The directory holding one scope's data.
     pub(crate) fn scope_dir(&self, scope: &Scope) -> PathBuf {
-        self.dir.join("scopes").join(dir_components(scope.as_str()))
+        self.scopes_dir().join(dir_components(scope.as_str()))
     }
 
     /// Hold the database lock. It guards no in-memory state (everything is on

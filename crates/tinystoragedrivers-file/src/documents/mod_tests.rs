@@ -59,9 +59,14 @@ async fn expiry_follows_the_injected_clock() {
             .unwrap(),
         "deleting an expired document reports nothing removed"
     );
-    assert!(
-        !collection_dir(&storage, "leases").join("l.json").exists(),
-        "but its file is gone"
+    let tombstone: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(collection_dir(&storage, "leases").join("l.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        tombstone,
+        json!({"id": "l", "version": v2.0}),
+        "its file becomes a tombstone"
     );
 }
 
@@ -263,4 +268,108 @@ async fn claims_and_searches_handle_empty_results() {
         ErrorKind::InvalidInput
     );
     assert!(format!("{docs:?}").contains("local"));
+}
+
+#[tokio::test]
+async fn deleted_ids_keep_their_version_across_a_reopen() {
+    let (dir, _storage, docs) = open();
+    docs.put("c", "a", json!({"n": 1}), Precondition::None)
+        .await
+        .unwrap();
+    let v2 = docs
+        .put("c", "a", json!({"n": 2}), Precondition::None)
+        .await
+        .unwrap();
+    docs.put("c", "b", json!({"n": 3}), Precondition::None)
+        .await
+        .unwrap();
+    assert_eq!(
+        docs.delete_where("c", &Filter::eq("n", 2)).await.unwrap(),
+        1
+    );
+    assert!(
+        !docs.delete("c", "a", Precondition::None).await.unwrap(),
+        "a tombstone is nothing to delete"
+    );
+    docs.drop_collection("c").await.unwrap();
+    assert_eq!(docs.count("c", &Filter::All).await.unwrap(), 0);
+
+    let reopened = FileStorage::open(dir.path()).unwrap();
+    let docs = Arc::clone(reopened.for_scope(&Scope::local()).unwrap().documents());
+    assert_eq!(
+        docs.put("c", "a", json!({}), Precondition::Version(v2))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::Conflict,
+        "a CAS prepared before the deletion fails"
+    );
+    let v3 = docs
+        .put("c", "a", json!({}), Precondition::Absent)
+        .await
+        .unwrap();
+    assert_eq!(v3.0, 3);
+    assert_eq!(
+        docs.put("c", "b", json!({}), Precondition::Absent)
+            .await
+            .unwrap()
+            .0,
+        2,
+        "dropping keeps history too"
+    );
+}
+
+#[tokio::test]
+async fn a_unique_index_is_refused_when_any_scope_violates_it() {
+    let (_dir, storage, docs) = open();
+    // A scope long enough to need continuation directories.
+    let far = Scope::new("T".repeat(120)).unwrap();
+    let far_docs = Arc::clone(storage.for_scope(&far).unwrap().documents());
+    docs.put("users", "a", json!({"email": "x"}), Precondition::None)
+        .await
+        .unwrap();
+    for id in ["a", "b"] {
+        far_docs
+            .put("users", id, json!({"email": "y"}), Precondition::None)
+            .await
+            .unwrap();
+    }
+    let unique = CollectionSpec::new("users").index(IndexSpec::new("by_email", ["email"]).unique());
+    assert_eq!(
+        docs.ensure_collection(&unique).await.unwrap_err().kind(),
+        ErrorKind::AlreadyExists
+    );
+    docs.put("users", "b", json!({"email": "x"}), Precondition::None)
+        .await
+        .expect("nothing was declared");
+    assert!(
+        !storage.dir().join("_meta/collections/users.json").exists(),
+        "the refused declaration was not persisted"
+    );
+
+    far_docs
+        .delete("users", "b", Precondition::None)
+        .await
+        .unwrap();
+    docs.delete("users", "b", Precondition::None).await.unwrap();
+    docs.ensure_collection(&unique).await.unwrap();
+    assert_eq!(
+        far_docs
+            .put("users", "c", json!({"email": "y"}), Precondition::None)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::AlreadyExists
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_scopes_directory_fails_the_declaration() {
+    let (_dir, storage, docs) = open();
+    std::fs::write(storage.dir().join("scopes"), b"not a directory").unwrap();
+    let unique = CollectionSpec::new("u").index(IndexSpec::new("i", ["k"]).unique());
+    assert_eq!(
+        docs.ensure_collection(&unique).await.unwrap_err().kind(),
+        ErrorKind::Backend
+    );
 }
