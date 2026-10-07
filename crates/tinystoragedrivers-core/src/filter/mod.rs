@@ -31,6 +31,10 @@ pub const ID_FIELD: &str = "_id";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "serde_json's `preserve_order`, which bson turns on wherever the MongoDB driver is linked, widens `Value` so `Range` outgrows the rest; boxing its bounds would change the public filter shape"
+)]
 pub enum Filter {
     /// Every document.
     #[default]
