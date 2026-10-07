@@ -93,7 +93,7 @@ impl StorageConfig {
     }
 
     fn parse_mongo(url: &str) -> Result<Self> {
-        let path = split_uri(url).map_or("", |parts| parts.path);
+        let path = split_uri(url, Boundary::BeforeQuery).map_or("", |parts| parts.path);
         let database = path.split('/').next().unwrap_or_default();
         if database.is_empty() {
             return Err(StorageError::invalid_input(format!(
@@ -139,21 +139,24 @@ struct UriParts<'a> {
 }
 
 /// Split a connection URI without trusting the credentials to be
-/// percent-encoded: the userinfo ends at the *last* `@` before the query, so a
-/// stray `/` or `@` inside a password cannot move the boundary.
-fn split_uri(url: &str) -> Option<UriParts<'_>> {
+/// percent-encoded: the userinfo ends at the *last* `@` (before the query, or
+/// anywhere, per `boundary`), so a stray `/` or `@` inside a password cannot
+/// move the boundary.
+fn split_uri(url: &str, boundary: Boundary) -> Option<UriParts<'_>> {
     let (scheme, rest) = url.split_once("://")?;
-    let (before_query, query) = match rest.split_once('?') {
+    let at = match boundary {
+        Boundary::BeforeQuery => rest.split('?').next().and_then(|head| head.rfind('@')),
+        Boundary::Anywhere => rest.rfind('@'),
+    };
+    let (userinfo, tail) = match at {
+        Some(at) => (rest.get(..at), rest.get(at + 1..).unwrap_or_default()),
+        None => (None, rest),
+    };
+    let (before_query, query) = match tail.split_once('?') {
         Some((head, query)) => (head, Some(query)),
-        None => (rest, None),
+        None => (tail, None),
     };
-    let (userinfo, after_userinfo) = match before_query.rsplit_once('@') {
-        Some((userinfo, tail)) => (Some(userinfo), tail),
-        None => (None, before_query),
-    };
-    let (hosts, path) = after_userinfo
-        .split_once('/')
-        .unwrap_or((after_userinfo, ""));
+    let (hosts, path) = before_query.split_once('/').unwrap_or((before_query, ""));
     Some(UriParts {
         scheme,
         userinfo,
@@ -161,6 +164,17 @@ fn split_uri(url: &str) -> Option<UriParts<'_>> {
         path,
         query,
     })
+}
+
+/// Where the userinfo of a connection URI may end.
+#[derive(Clone, Copy)]
+enum Boundary {
+    /// At the last `@` before the query: the parse of a well-formed URI,
+    /// where an `@` in a query value (`appName=a@b`) stays in the query.
+    BeforeQuery,
+    /// At the last `@` anywhere: for redaction, so an unencoded `?`, `/` or
+    /// `@` in a password can only make more text hidden, never less.
+    Anywhere,
 }
 
 /// Query options whose values are credentials (AWS session tokens ride in
@@ -174,7 +188,7 @@ const SECRET_OPTIONS: [&str; 3] = [
 /// Hide every credential in a connection URI: the password, and the value of
 /// any option in [`SECRET_OPTIONS`].
 fn redact(url: &str) -> String {
-    let Some(parts) = split_uri(url) else {
+    let Some(parts) = split_uri(url, Boundary::Anywhere) else {
         return url.to_owned();
     };
     let mut out = format!("{}://", parts.scheme);

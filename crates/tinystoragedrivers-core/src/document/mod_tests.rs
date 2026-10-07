@@ -405,3 +405,13 @@ async fn query_all_refuses_a_cursor_that_never_advances() {
     stuck.drop_collection("c").await.unwrap();
     assert!(stuck.capabilities().iter().next().is_none());
 }
+
+#[test]
+fn sort_fields_are_validated() {
+    assert!(Query::all().sort(Sort::asc("_id")).validate().is_ok());
+    assert!(Query::all().sort(Sort::asc("a.b")).validate().is_ok());
+    for bad in ["", "a..b", ".a"] {
+        let error = Query::all().sort(Sort::asc(bad)).validate().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput, "{bad:?}");
+    }
+}
