@@ -117,6 +117,18 @@ pub(super) async fn databases(backend: &dyn StorageBackend) {
     assert!(ok(two.documents().get(&coll, "x").await, "other database").is_none());
     assert!(ok(root.documents().get(&coll, "x").await, "root").is_none());
 
+    let stream = unique("db_stream");
+    ok(one.streams().append(&stream, json!(1)).await, "append one");
+    assert_eq!(ok(one_again.streams().len(&stream).await, "same stream"), 1);
+    assert_eq!(ok(two.streams().len(&stream).await, "other stream"), 0);
+    assert_eq!(ok(root.streams().len(&stream).await, "root stream"), 0);
+
+    let key = format!("{}/k", unique("db_blob"));
+    ok(one.blobs().put(&key, vec![1], None).await, "blob one");
+    assert!(ok(one_again.blobs().head(&key).await, "same blob").is_some());
+    assert!(ok(two.blobs().head(&key).await, "other blob").is_none());
+    assert!(ok(root.blobs().head(&key).await, "root blob").is_none());
+
     fails(
         backend.database("Bad Name").map(|_| ()),
         ErrorKind::InvalidInput,

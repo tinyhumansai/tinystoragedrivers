@@ -100,6 +100,12 @@ fn mixed_integers_and_floats_compare_exactly() {
     assert_eq!(compare(&json!(i64::MIN), &json!(-1e30)), Ordering::Greater);
     assert_eq!(compare(&json!(i64::MIN), &json!(-1e40)), Ordering::Greater);
     assert_eq!(compare(&json!(0), &json!(1e40)), Ordering::Less);
-    assert_eq!(compare_integer_float(0, f64::NAN), Ordering::Less);
     assert_eq!(compare(&json!(1.5), &json!(2.5)), Ordering::Less);
+}
+
+#[test]
+fn signed_zeros_are_equal() {
+    assert!(equal(&json!(-0.0), &json!(0.0)));
+    assert!(equal(&json!(0), &json!(-0.0)));
+    assert_eq!(compare(&json!(-0.5), &json!(-0.0)), Ordering::Less);
 }

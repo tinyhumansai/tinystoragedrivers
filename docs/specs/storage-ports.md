@@ -38,7 +38,10 @@ Versioned JSON **objects** in named collections.
   prefix `_tsd` is reserved for drivers. Ids are 1–512 bytes without NUL.
 - **Versions.** A new document is version 1, and every write produces a
   strictly greater version. A write that would exceed `u64::MAX` fails with
-  `ErrorKind::Backend` and changes nothing; a version is never reused.
+  `ErrorKind::Backend` and changes nothing; a version is never reused. That
+  holds across deletion: a deleted (or dropped) id that is written again
+  continues from its last version, so a compare-and-swap prepared before the
+  deletion fails instead of overwriting the new document.
 - **Preconditions.** `Precondition::None` upserts. `Absent` inserts. `Version(v)`
   is a compare-and-swap. A failed precondition is `ErrorKind::Conflict`.
 - **Filters.** `Filter` supports `eq`, `ne`, `in`, `range`, `exists`, `and`,
@@ -49,13 +52,15 @@ Versioned JSON **objects** in named collections.
   - `ne` matches documents where the field is absent.
 - **Sorting.** Any number of keys. Ties, and an empty sort, fall back to id
   ascending. A missing field sorts as null.
-- **Paging.** `Query.limit` caps a page and must be at least 1. `Page.next`
+- **Paging.** `Query.limit` caps a page and must be at least 1. Sort fields
+  follow the same path rules as filters. `Page.next`
   is an opaque cursor, valid only for the same collection, filter and sort on
   the same driver; any other cursor is `ErrorKind::InvalidInput`.
 - **Declarations.** `ensure_collection` merges into what is already declared:
   indexes and search fields accumulate, and an expiry field can be added but
   not changed. Redeclaring an index name with different fields is
-  `InvalidInput`. A declaration is schema, written by host code rather than
+  `InvalidInput`. Adding a unique index that stored documents already violate
+  (in any scope) is `AlreadyExists`, and nothing is declared. A declaration is schema, written by host code rather than
   tenants, so it applies to the collection in every scope, the way a SQL or
   MongoDB index spans the whole table or collection.
 - **Indexes.** Any field is queryable. An `IndexSpec` is a performance hint;

@@ -138,3 +138,16 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
     );
     assert_eq!(redact("mongodb://h?x=1"), "mongodb://h/?x=1");
 }
+
+#[test]
+fn a_question_mark_in_a_password_stays_hidden() {
+    let shown = redact("mongodb://app:p?assword@host/db");
+    assert_eq!(shown, "mongodb://app:***@host/db");
+    let error = StorageConfig::parse("mongodb://app:p?assword@host").unwrap_err();
+    assert!(!error.to_string().contains("assword"), "{error}");
+    let query_at = StorageConfig::parse("mongodb://h/db?appName=a@b").unwrap();
+    let StorageConfig::MongoDb { database, .. } = &query_at else {
+        panic!("expected a MongoDB config")
+    };
+    assert_eq!(database, "db", "an @ in a query value is not userinfo");
+}

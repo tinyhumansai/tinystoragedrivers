@@ -100,12 +100,14 @@ fn as_integer(n: &serde_json::Number) -> Option<i128> {
 fn compare_numbers(x: &serde_json::Number, y: &serde_json::Number) -> Ordering {
     match (as_integer(x), as_integer(y)) {
         (Some(a), Some(b)) => a.cmp(&b),
-        (Some(a), None) => compare_integer_float(a, y.as_f64().unwrap_or(f64::NAN)),
-        (None, Some(b)) => compare_integer_float(b, x.as_f64().unwrap_or(f64::NAN)).reverse(),
+        (Some(a), None) => compare_integer_float(a, y.as_f64().unwrap_or(0.0)),
+        (None, Some(b)) => compare_integer_float(b, x.as_f64().unwrap_or(0.0)).reverse(),
         (None, None) => {
-            let a = x.as_f64().unwrap_or(f64::NAN);
-            let b = y.as_f64().unwrap_or(f64::NAN);
-            a.total_cmp(&b)
+            let a = x.as_f64().unwrap_or(0.0);
+            let b = y.as_f64().unwrap_or(0.0);
+            // JSON numbers are finite, so `partial_cmp` is total here, and
+            // unlike `total_cmp` it treats -0.0 and 0.0 as equal.
+            a.partial_cmp(&b).unwrap_or(Ordering::Equal)
         }
     }
 }
@@ -115,9 +117,6 @@ fn compare_numbers(x: &serde_json::Number, y: &serde_json::Number) -> Ordering {
 fn compare_integer_float(int: i128, float: f64) -> Ordering {
     // Every JSON integer fits in [-2^63, 2^64), well inside ±2^100.
     const BOUND: f64 = 1.267_650_600_228_229_4e30;
-    if float.is_nan() {
-        return Ordering::Less;
-    }
     if float >= BOUND {
         return Ordering::Less;
     }
@@ -125,7 +124,8 @@ fn compare_integer_float(int: i128, float: f64) -> Ordering {
         return Ordering::Greater;
     }
     let floor = float.floor();
-    // `floor` is integral and inside ±2^100, so the cast is exact.
+    // `floor` is an integer-valued f64 inside ±2^100. Every integer-valued
+    // f64 is an exact integer, so converting it to i128 loses nothing.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "floor is integral and bounded well inside the i128 range"

@@ -241,13 +241,14 @@ pub trait DocumentStoreExt: DocumentStore {
     async fn query_all(&self, collection: &str, query: &Query) -> Result<Vec<Versioned<Value>>> {
         let mut query = query.clone();
         let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         loop {
             let page = self.query(collection, &query).await?;
             out.extend(page.items);
             match page.next {
-                // A driver that hands back the cursor it was given would loop
-                // forever; treat that as the driver bug it is.
-                Some(cursor) if query.cursor.as_ref() == Some(&cursor) => {
+                // A driver that hands back any cursor it already issued would
+                // loop forever; treat that as the driver bug it is.
+                Some(cursor) if !seen.insert(cursor.0.clone()) => {
                     return Err(StorageError::backend("query paging did not advance"));
                 }
                 Some(cursor) => query.cursor = Some(cursor),
