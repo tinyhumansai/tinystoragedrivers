@@ -17,6 +17,7 @@ publish = false
 tinystoragedrivers-core = { workspace = true }
 # The plain-file driver, compiled in only with the `file` feature.
 tinystoragedrivers-file = { workspace = true, optional = true }
+tinystoragedrivers-sqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The integration test runs the conformance suite through the facade.
@@ -28,6 +29,8 @@ tempfile = { workspace = true }
 
 [features]
 default = []
+# `sqlite:` URLs and bare paths: the SQLite driver.
+sqlite = ["dep:tinystoragedrivers-sqlite"]
 # Re-export the core's synchronous bridge.
 blocking = ["tinystoragedrivers-core/blocking"]
 # Re-export the core's conformance suite for downstream repository tests.

@@ -101,7 +101,11 @@ fn names_its_driver_and_renders() {
 async fn opens_memory_and_names_missing_features() {
     let backend = open(&StorageConfig::Memory).await.unwrap();
     assert_eq!(backend.driver(), "memory");
-    let mut missing = vec!["sqlite:/tmp/x", "mongodb://h/db"];
+    let mut missing = Vec::new();
+    if cfg!(not(feature = "sqlite")) {
+        missing.push("sqlite:/tmp/x");
+    }
+    missing.push("mongodb://h/db");
     if cfg!(not(feature = "file")) {
         missing.push("file:/tmp/x");
     }
@@ -156,6 +160,22 @@ fn redaction_survives_unencoded_credentials_and_secret_options() {
         "mongodb://h/?tlsCertificateKeyFilePassword=***&x"
     );
     assert_eq!(redact("mongodb://h?x=1"), "mongodb://h/?x=1");
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn opens_sqlite_directories_and_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite:{}", dir.path().display());
+    let backend = open(&StorageConfig::parse(&url).unwrap()).await.unwrap();
+    assert_eq!(backend.driver(), "sqlite");
+    assert!(dir.path().join("storage.db").exists());
+    let file = dir.path().join("single.db");
+    let backend = open(&StorageConfig::Sqlite { path: file.clone() })
+        .await
+        .unwrap();
+    assert_eq!(backend.driver(), "sqlite");
+    assert!(file.exists());
 }
 
 #[test]

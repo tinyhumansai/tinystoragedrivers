@@ -7,7 +7,7 @@ on one small set of ports. The host chooses the backend once at boot, from a URL
 | Deployment | URL | Driver |
 | --- | --- | --- |
 | Tests, stateless embedders | `memory` | in-process maps |
-| Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file per named database *(planned)* |
+| Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file per named database (feature `sqlite`) |
 | Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant *(planned)* |
 | Plain files | `file:<dir>` | JSON documents, JSONL streams and raw blobs on disk (`tinystoragedrivers-file`, feature `file`) |
 
@@ -63,6 +63,7 @@ crates/
 ├── tinystoragedrivers-core/   # ports, Scope, filters, errors, memory driver,
 │                              # blocking bridge, conformance suite
 ├── tinystoragedrivers-file/   # `file:<dir>`: JSON, JSONL and raw files
+├── tinystoragedrivers-sqlite/ # SQLite: generic tables, FTS5, native access
 └── tinystoragedrivers/        # facade: StorageConfig URL parsing, open(),
                                # driver features, re-exports the core
 ```
