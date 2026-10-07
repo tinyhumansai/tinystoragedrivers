@@ -264,6 +264,10 @@ pub async fn open(config: &StorageConfig) -> Result<Arc<dyn StorageBackend>> {
         StorageConfig::MongoDb { uri, database } => Ok(Arc::new(
             tinystoragedrivers_mongodb::MongoStorage::connect(uri, database).await?,
         )),
+        #[allow(
+            unreachable_patterns,
+            reason = "reachable unless every driver feature is enabled"
+        )]
         other => Err(StorageError::invalid_input(format!(
             "storage URL `{other}` needs the `{}` driver, which is not available in this build of tinystoragedrivers",
             other.driver()
