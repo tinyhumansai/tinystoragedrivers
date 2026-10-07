@@ -51,7 +51,12 @@ on every call:
   treated as empty or overwritten.
 - `KeyringSecrets` cannot enumerate (`enumerable() == false`, `list` fails with
   `ErrorKind::Backend`). A locked store is `ErrorKind::Unavailable`.
-  `load_or_create_key` creates a key only when the entry is genuinely absent.
+  `load_or_create_key` creates a key only when the entry is genuinely absent,
+  and serializes creation within the process. The OS stores have no
+  create-if-absent, so create the key from one process at boot.
+- `load_or_create_key_file` writes and syncs a temp sibling, then publishes it
+  with a hard link that fails if the key file exists. Readers never see a
+  partial key, and racing creators adopt the winner's key.
 - File and keyring calls run on the tokio blocking pool when a runtime is
   present.
 - Error messages never contain key bytes, plaintext, or secret names.

@@ -234,17 +234,56 @@ fn a_failed_rename_removes_the_staged_file() {
 fn staging_skips_leftover_temp_files() {
     let dir = TempDir::new("leftover");
     let path = dir.0.join("secrets.enc");
-    let start = TEMP_COUNTER.load(Ordering::Relaxed);
-    for seq in start..start + 1000 {
+    // Leftovers from a crashed writer with this pid at sequence 0 and 1.
+    for seq in 0..2 {
         fs::write(
             dir.0
                 .join(format!("secrets.enc.{}.{seq}.tmp", std::process::id())),
-            b"",
+            b"stale",
         )
         .unwrap();
     }
-    write_atomic(&path, b"fresh").unwrap();
-    assert_eq!(fs::read(&path).unwrap(), b"fresh");
+    // A private sequence, so no concurrent test can move it.
+    let mut next = 0..;
+    let tmp = stage(&path, b"fresh", &mut || next.next().unwrap()).unwrap();
+    assert!(tmp.to_string_lossy().ends_with(".2.tmp"), "{tmp:?}");
+    assert_eq!(fs::read(&tmp).unwrap(), b"fresh");
+}
+
+#[test]
+fn write_atomic_replaces_an_existing_file() {
+    let dir = TempDir::new("replace");
+    let path = dir.0.join("secrets.enc");
+    write_atomic(&path, b"old").unwrap();
+    write_atomic(&path, b"new").unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"new");
+}
+
+#[test]
+fn a_key_published_concurrently_wins_and_the_temp_file_goes() {
+    let dir = TempDir::new("key-race");
+    let path = dir.0.join(".secret_key");
+    fs::write(&path, crate::crypto::tests::FIXTURE_KEY_HEX).unwrap();
+    let loser = crypto::generate_key();
+    let tmp = stage(&path, key_to_hex(&loser).as_bytes(), &mut next_temp_seq).unwrap();
+    let adopted = publish_key(&tmp, &path, loser).unwrap();
+    assert_eq!(*adopted, *fixture_key());
+    assert!(!tmp.exists());
+}
+
+#[test]
+fn a_key_that_cannot_be_published_is_a_backend_error() {
+    let dir = TempDir::new("key-publish");
+    let tmp = stage(&dir.0.join("staged"), b"00", &mut next_temp_seq).unwrap();
+    // The destination's directory does not exist.
+    let error = publish_key(
+        &tmp,
+        &dir.0.join("missing/.secret_key"),
+        crypto::generate_key(),
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
+    assert!(!tmp.exists());
 }
 
 #[test]

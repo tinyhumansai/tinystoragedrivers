@@ -227,6 +227,22 @@ async fn load_or_create_key_creates_once_then_reuses() {
     assert_eq!(*first, *second);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_key_creation_agrees_on_one_key() {
+    let (secrets, _) = fake(Fault::None);
+    let tasks: Vec<_> = (0..16)
+        .map(|_| {
+            let secrets = secrets.clone();
+            tokio::spawn(async move { secrets.load_or_create_key("app:race").await.unwrap() })
+        })
+        .collect();
+    let mut keys = Vec::new();
+    for task in tasks {
+        keys.push(*task.await.unwrap());
+    }
+    assert!(keys.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
 #[tokio::test]
 async fn load_or_create_key_reads_openhumans_hex_master_key() {
     let (secrets, store) = fake(Fault::None);
@@ -337,10 +353,15 @@ async fn live_keyring_conformance() {
     }
     let secrets = KeyringSecrets::new("tinystoragedrivers-live-test");
     secrets_conformance(&secrets).await;
-    let key = secrets.load_or_create_key("live:master_key").await.unwrap();
-    assert_eq!(
-        *secrets.load_or_create_key("live:master_key").await.unwrap(),
-        *key
-    );
-    assert!(secrets.delete("live:master_key").await.unwrap());
+    // A name unique to this run, so the cleanup below can only remove the
+    // credential this test created.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let name = format!("live:master_key:{}:{nanos}", std::process::id());
+    assert!(secrets.get(&name).await.unwrap().is_none());
+    let key = secrets.load_or_create_key(&name).await.unwrap();
+    assert_eq!(*secrets.load_or_create_key(&name).await.unwrap(), *key);
+    assert!(secrets.delete(&name).await.unwrap());
 }

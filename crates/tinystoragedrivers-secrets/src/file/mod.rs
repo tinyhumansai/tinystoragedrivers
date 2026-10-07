@@ -259,28 +259,45 @@ fn create_parent(path: &Path) -> Result<()> {
 }
 
 /// Replace `path` with `bytes` atomically, `0600` on Unix.
+///
+/// `std::fs::rename` replaces an existing destination on every platform
+/// (`MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` on Windows), so a reader
+/// sees the whole old file or the whole new one.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    create_parent(path)?;
-    let (tmp_path, mut file) = reserve_temp_file(path)?;
-    let staged = (|| -> std::io::Result<()> {
-        restrict_permissions(&file)?;
-        file.write_all(bytes)?;
-        file.sync_all()
-    })();
-    let published = staged.and_then(|()| fs::rename(&tmp_path, path));
-    published.map_err(|e| {
+    let tmp_path = stage(path, bytes, &mut next_temp_seq)?;
+    fs::rename(&tmp_path, path).map_err(|e| {
         let _ = fs::remove_file(&tmp_path);
         io_error("write the secrets file", e)
     })
 }
 
+/// The next temp-file sequence number for this process.
+fn next_temp_seq() -> u64 {
+    TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Write `bytes` to a fresh, synced, `0600` temp sibling of `path` and return
+/// its path. Nothing is left behind on failure.
+fn stage(path: &Path, bytes: &[u8], next_seq: &mut dyn FnMut() -> u64) -> Result<PathBuf> {
+    create_parent(path)?;
+    let (tmp_path, mut file) = reserve_temp_file(path, next_seq)?;
+    let staged = (|| -> std::io::Result<()> {
+        restrict_permissions(&file)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    staged.map(|()| tmp_path.clone()).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        io_error("stage the secrets file", e)
+    })
+}
+
 /// Create a fresh temp sibling of `path`, skipping leftovers from crashed
 /// writers whose pid has been reused.
-fn reserve_temp_file(path: &Path) -> Result<(PathBuf, File)> {
+fn reserve_temp_file(path: &Path, next_seq: &mut dyn FnMut() -> u64) -> Result<(PathBuf, File)> {
     loop {
-        let seq = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut name = path.file_name().unwrap_or_default().to_os_string();
-        name.push(format!(".{}.{seq}.tmp", std::process::id()));
+        name.push(format!(".{}.{}.tmp", std::process::id(), next_seq()));
         let tmp_path = path.with_file_name(name);
         match OpenOptions::new()
             .create_new(true)
@@ -308,33 +325,42 @@ fn restrict_permissions(_file: &File) -> std::io::Result<()> {
 /// Load the hex key at `path`, or create it with 32 random bytes when absent.
 ///
 /// This is the `.secret_key` format of OpenHuman's `SecretStore`: 64 hex
-/// characters, surrounding whitespace ignored. A new file is created
-/// exclusively (`0600` on Unix), so two processes racing to create it agree on
-/// the winner's key. Blocks on disk I/O.
+/// characters, surrounding whitespace ignored. A new key is written and synced
+/// to a temp sibling (`0600` on Unix) and only then published under `path`
+/// with a hard link, which fails if the file already exists. A reader never
+/// sees a partial key file, and two processes racing to create it agree on the
+/// winner's key. Blocks on disk I/O.
 ///
 /// # Errors
 ///
 /// [`ErrorKind::Crypto`](tinystoragedrivers_core::ErrorKind::Crypto) for a
 /// key file that is not 32 bytes of hex, or an I/O error mapped as the file
-/// driver maps them.
+/// driver maps them (including a filesystem without hard links).
 pub fn load_or_create_key_file(path: &Path) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     match read_key_file(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         other => return parse_key_file(other),
     }
-    create_parent(path)?;
     let key = crypto::generate_key();
-    match create_exclusive(path) {
-        Ok(mut file) => {
-            file.write_all(key_to_hex(&key).as_bytes())
-                .and_then(|()| file.sync_all())
-                .map_err(|e| io_error("write the key file", e))?;
-            Ok(key)
-        }
+    let tmp_path = stage(path, key_to_hex(&key).as_bytes(), &mut next_temp_seq)?;
+    publish_key(&tmp_path, path, key)
+}
+
+/// Publish the staged key at `tmp_path` as `path` unless `path` exists, in
+/// which case the existing key wins. The temp file is always removed.
+fn publish_key(
+    tmp_path: &Path,
+    path: &Path,
+    key: Zeroizing<[u8; KEY_LEN]>,
+) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+    let linked = fs::hard_link(tmp_path, path);
+    let _ = fs::remove_file(tmp_path);
+    match linked {
+        Ok(()) => Ok(key),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             parse_key_file(read_key_file(path))
         }
-        Err(e) => Err(io_error("create the key file", e)),
+        Err(e) => Err(io_error("publish the key file", e)),
     }
 }
 
@@ -345,17 +371,6 @@ fn read_key_file(path: &Path) -> std::io::Result<Zeroizing<String>> {
 fn parse_key_file(read: std::io::Result<Zeroizing<String>>) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     let hex = read.map_err(|e| io_error("read the key file", e))?;
     key_from_hex(&hex)
-}
-
-fn create_exclusive(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
 }
 
 #[cfg(test)]

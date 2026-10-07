@@ -16,7 +16,7 @@
 //! wrappers; what an error *means* is decided in [`map_keyring_error`].
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use keyring::{CredentialBuilder, Entry};
@@ -26,6 +26,10 @@ use zeroize::Zeroizing;
 use crate::crypto::{self, KEY_LEN, key_from_hex, key_to_hex};
 use crate::store::{SecretStore, require_utf8, validate_name, validate_prefix};
 use crate::task::run_blocking;
+
+/// Serializes [`KeyringSecrets::load_or_create_key`] within the process, so
+/// two callers cannot both see an absent key and store different ones.
+static KEY_INIT: Mutex<()> = Mutex::new(());
 
 /// Secrets in the native OS credential store.
 ///
@@ -85,6 +89,12 @@ impl KeyringSecrets {
     /// encrypted under it. A created key is read back and compared before it
     /// is returned.
     ///
+    /// Concurrent calls in one process are serialized, so they all return the
+    /// same key. The OS stores offer no create-if-absent, so two *processes*
+    /// creating the same key at the same moment can still race; the read-back
+    /// turns the loser's overwritten write into an error rather than a silent
+    /// wrong key, but a host should create the key from one process at boot.
+    ///
     /// # Errors
     ///
     /// [`ErrorKind::InvalidInput`](tinystoragedrivers_core::ErrorKind::InvalidInput)
@@ -96,6 +106,7 @@ impl KeyringSecrets {
         let this = self.clone();
         let name = name.to_string();
         run_blocking(move || {
+            let _serialized = KEY_INIT.lock().unwrap_or_else(PoisonError::into_inner);
             let entry = this.entry(&name)?;
             match entry.get_password() {
                 Ok(hex) => key_from_hex(&Zeroizing::new(hex)),

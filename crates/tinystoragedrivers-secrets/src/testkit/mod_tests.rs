@@ -23,7 +23,8 @@ impl SecretStore for Opaque {
     async fn delete(&self, name: &str) -> Result<bool> {
         self.0.delete(name).await
     }
-    async fn list(&self, _prefix: &str) -> Result<Vec<String>> {
+    async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        crate::store::validate_prefix(prefix)?;
         Err(StorageError::backend("cannot enumerate"))
     }
     fn enumerable(&self) -> bool {
@@ -66,6 +67,40 @@ async fn a_non_enumerable_store_with_the_wrong_list_error_fails() {
         }
     }
     secrets_conformance(&WrongKind::default()).await;
+}
+
+/// A store that drops every overwrite, so the suite fails part way.
+#[derive(Debug, Default)]
+struct ForgetsOverwrites(MemorySecrets);
+
+#[async_trait]
+impl SecretStore for ForgetsOverwrites {
+    async fn get(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        self.0.get(name).await
+    }
+    async fn set(&self, name: &str, value: &[u8]) -> Result<()> {
+        if self.0.get(name).await?.is_none() {
+            self.0.set(name, value).await?;
+        }
+        Ok(())
+    }
+    async fn delete(&self, name: &str) -> Result<bool> {
+        self.0.delete(name).await
+    }
+    async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.0.list(prefix).await
+    }
+    fn backend_name(&self) -> &'static str {
+        "forgetful"
+    }
+}
+
+#[tokio::test]
+async fn a_failed_check_still_removes_what_the_suite_wrote() {
+    let store = ForgetsOverwrites::default();
+    let outcome = CatchUnwind(Box::pin(secrets_conformance(&store))).await;
+    assert!(outcome.is_err(), "the overwrite check must fail");
+    assert_eq!(store.0.list("").await.unwrap(), Vec::<String>::new());
 }
 
 #[test]

@@ -4,7 +4,7 @@
 //! Every name the suite writes starts with a prefix unique to the run, so it
 //! can point at a long-lived store (a real OS keychain behind
 //! `TSD_LIVE_KEYRING=1`, a shared database) without colliding with anything
-//! else, and it deletes what it wrote. Values are UTF-8 text, the subset every
+//! else, and it deletes what it wrote, also when a check fails part way. Values are UTF-8 text, the subset every
 //! driver can hold.
 //!
 //! Failures panic with a message naming the check, which is how a Rust test
@@ -17,7 +17,11 @@
     reason = "the conformance suite reports a failed check by panicking inside the driver's test"
 )]
 
+use std::future::Future;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tinystoragedrivers_core::ErrorKind;
@@ -35,12 +39,39 @@ pub async fn secrets_conformance(store: &dyn SecretStore) {
         "backend_name must not be empty"
     );
     let names = Names(unique_prefix());
-    round_trip(store, &names).await;
-    listing(store, &names).await;
-    deletion(store, &names).await;
-    invalid_names(store).await;
-    for suffix in ["b", "b:nested"] {
-        store.delete(&names.of(suffix)).await.expect("cleanup");
+    let checks = CatchUnwind(Box::pin(async {
+        round_trip(store, &names).await;
+        listing(store, &names).await;
+        deletion(store, &names).await;
+        invalid_names(store).await;
+    }));
+    let outcome = checks.await;
+    // Best effort and unconditional: a failed check must not leave test
+    // secrets behind in a long-lived store.
+    for suffix in WRITTEN {
+        let _ = store.delete(&names.of(suffix)).await;
+    }
+    if let Err(panic) = outcome {
+        resume_unwind(panic);
+    }
+}
+
+/// Every suffix the suite may write.
+const WRITTEN: [&str; 3] = ["a", "b", "b:nested"];
+
+/// Polls a future, turning a panic inside it into an `Err`, so cleanup can
+/// run before the panic is resumed.
+struct CatchUnwind<F>(Pin<Box<F>>);
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = self.0.as_mut();
+        match catch_unwind(AssertUnwindSafe(|| inner.poll(cx))) {
+            Ok(poll) => poll.map(Ok),
+            Err(panic) => Poll::Ready(Err(panic)),
+        }
     }
 }
 
@@ -168,12 +199,12 @@ async fn invalid_names(store: &dyn SecretStore) {
             "delete must reject an invalid name",
         );
     }
-    if store.enumerable() {
-        expect_invalid(
-            store.list("bad\0prefix").await,
-            "list must reject an invalid prefix",
-        );
-    }
+    // Checked whether or not the store can enumerate: an invalid prefix is
+    // the caller's error either way.
+    expect_invalid(
+        store.list("bad\0prefix").await,
+        "list must reject an invalid prefix",
+    );
 }
 
 fn expect_invalid<T>(result: tinystoragedrivers_core::Result<T>, check: &str) {
