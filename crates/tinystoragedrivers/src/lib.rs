@@ -25,9 +25,10 @@
 //! | URL | Driver | Feature |
 //! | --- | --- | --- |
 //! | `memory` | in-process maps | always |
+//! | `sqlite:<dir>`, `sqlite:<file>.db`, `/abs/path` | SQLite ([`sqlite`]) | `sqlite` |
 //!
-//! SQLite, MongoDB and file drivers land as separate crates and are forwarded
-//! here behind `sqlite`, `mongodb` and `file` features.
+//! MongoDB and file drivers land as separate crates and are forwarded here
+//! behind `mongodb` and `file` features.
 //!
 //! This crate holds no repository for any particular record type; sessions,
 //! approvals and workflow runs belong to the crates that own them.
@@ -36,3 +37,7 @@ mod config;
 
 pub use config::{StorageConfig, open};
 pub use tinystoragedrivers_core::*;
+/// The SQLite driver, including raw access for owners that keep their own
+/// tables.
+#[cfg(feature = "sqlite")]
+pub use tinystoragedrivers_sqlite as sqlite;
