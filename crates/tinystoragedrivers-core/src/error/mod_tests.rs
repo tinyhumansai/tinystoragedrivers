@@ -1,7 +1,5 @@
 //! Error kinds, constructors, display and retry classification.
 
-use std::error::Error as _;
-
 use super::*;
 
 #[test]
@@ -61,10 +59,12 @@ fn keeps_the_source_error() {
     let io = std::io::Error::other("disk gone");
     let error = StorageError::unavailable("write failed").with_source(io);
     assert_eq!(
-        error.source().map(ToString::to_string).as_deref(),
+        std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .as_deref(),
         Some("disk gone")
     );
-    assert!(StorageError::backend("plain").source().is_none());
+    assert!(std::error::Error::source(&StorageError::backend("plain")).is_none());
 }
 
 #[test]
@@ -72,5 +72,5 @@ fn json_errors_become_serialization_errors() {
     let parse = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
     let error = StorageError::from(parse);
     assert_eq!(error.kind(), ErrorKind::Serialization);
-    assert!(error.source().is_some());
+    assert!(std::error::Error::source(&error).is_some());
 }

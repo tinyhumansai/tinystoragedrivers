@@ -108,8 +108,33 @@ async fn opens_memory_and_names_missing_features() {
         assert!(
             error
                 .message()
-                .contains(&format!("`{}` feature", config.driver())),
+                .contains(&format!("`{}` driver", config.driver())),
             "{error}"
         );
     }
+}
+
+#[test]
+fn redaction_survives_unencoded_credentials_and_secret_options() {
+    let slash = StorageConfig::parse("mongodb://app:p/a@ss@host/db").unwrap();
+    assert_eq!(slash.to_string(), "mongodb://app:***@host/db");
+    let StorageConfig::MongoDb { database, .. } = &slash else {
+        panic!("expected a MongoDB config")
+    };
+    assert_eq!(database, "db");
+
+    let aws = StorageConfig::parse(
+        "mongodb+srv://h/db?authMechanism=MONGODB-AWS&authMechanismProperties=AWS_SESSION_TOKEN:tok&retryWrites=true",
+    )
+    .unwrap();
+    let shown = aws.to_string();
+    assert!(!shown.contains("tok"), "{shown}");
+    assert!(shown.contains("authMechanismProperties=***"), "{shown}");
+    assert!(shown.contains("retryWrites=true"), "{shown}");
+
+    assert_eq!(
+        redact("mongodb://h/?tlsCertificateKeyFilePassword=pw&x"),
+        "mongodb://h/?tlsCertificateKeyFilePassword=***&x"
+    );
+    assert_eq!(redact("mongodb://h?x=1"), "mongodb://h/?x=1");
 }

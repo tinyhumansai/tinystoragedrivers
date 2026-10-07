@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use super::{fails, has, ok, unique};
+use super::{empty, fails, has, ok, unique};
 use crate::backend::ScopedStorage;
 use crate::capabilities::Capability;
 use crate::document::{
@@ -522,6 +522,9 @@ async fn search(storage: &ScopedStorage) {
         .collect();
     ids.sort();
     assert_eq!(ids, ["a", "c"], "only declared fields are searched");
-    assert!(ok(docs.search(&coll, "nothing-matches", 10).await, "no hits").is_empty());
+    empty(
+        &ok(docs.search(&coll, "nothing-matches", 10).await, "no hits"),
+        "expected nothing",
+    );
     assert_eq!(ok(docs.search(&coll, "budget", 1).await, "limit").len(), 1);
 }

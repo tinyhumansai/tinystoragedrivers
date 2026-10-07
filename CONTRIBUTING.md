@@ -29,7 +29,7 @@ installing `cargo-llvm-cov`, run the same gate locally:
 1. Branch from `main` — never commit directly to it. If you use the `worktree`
    helper, work inside `worktrees/<slug>`.
 2. Put each feature area in its own module directory: `mod.rs` for the module
-   root and public surface, `types.rs` for substantial types, `test.rs` for
+   root and public surface, `types.rs` for substantial types, `mod_tests.rs` for
    module-local unit tests. Integration tests belong in `tests/`.
 3. Add a specific variant to the crate error type rather than encoding new
    failure context into a message string.

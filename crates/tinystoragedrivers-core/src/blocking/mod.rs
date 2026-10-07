@@ -76,9 +76,14 @@ impl Blocking {
                 runtime.block_on(async move {
                     // Each call is its own task, so a slow one does not hold up
                     // the rest; the runtime drives them while this loop waits.
+                    let mut running = tokio::task::JoinSet::new();
                     while let Some(job) = receiver.recv().await {
-                        tokio::spawn(job);
+                        running.spawn(job);
+                        while running.try_join_next().is_some() {}
                     }
+                    // Every handle is gone; let in-flight calls finish rather
+                    // than cancelling them with the runtime.
+                    while running.join_next().await.is_some() {}
                 });
             })
             .map_err(startup_error("cannot start the blocking bridge thread"))?;
@@ -86,6 +91,13 @@ impl Blocking {
     }
 
     /// Run `future` on the bridge thread and wait for its output.
+    ///
+    /// The calling thread blocks until the future completes. The future runs
+    /// on the bridge's own runtime, so it must not wait on work that only the
+    /// caller's thread can drive: from inside a current-thread runtime, a
+    /// future that awaits a task spawned on *that* runtime never completes.
+    /// Port futures from any driver in this repository are self-contained and
+    /// safe to run here.
     ///
     /// # Errors
     ///

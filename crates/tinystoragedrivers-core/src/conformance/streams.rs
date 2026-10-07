@@ -2,7 +2,7 @@
 
 use serde_json::json;
 
-use super::{fails, ok, unique};
+use super::{empty, fails, ok, unique};
 use crate::backend::ScopedStorage;
 use crate::error::ErrorKind;
 
@@ -11,7 +11,10 @@ pub(super) async fn run(storage: &ScopedStorage) {
     let name = unique("stream");
 
     assert_eq!(ok(streams.len(&name).await, "len of a missing stream"), 0);
-    assert!(ok(streams.read_window(&name, 0, 10).await, "read missing").is_empty());
+    empty(
+        &ok(streams.read_window(&name, 0, 10).await, "read missing"),
+        "expected nothing",
+    );
     assert_eq!(
         ok(streams.append_batch(&name, vec![]).await, "empty batch"),
         0
@@ -44,7 +47,10 @@ pub(super) async fn run(storage: &ScopedStorage) {
     let offsets: Vec<_> = window.iter().map(|e| e.offset).collect();
     assert_eq!(offsets, [1, 2]);
     assert_eq!(window[1].value, json!({"i": 2}));
-    assert!(ok(streams.read_window(&name, 9, 2).await, "past the end").is_empty());
+    empty(
+        &ok(streams.read_window(&name, 9, 2).await, "past the end"),
+        "expected nothing",
+    );
 
     assert_eq!(ok(streams.truncate_before(&name, 2).await, "truncate"), 2);
     assert_eq!(

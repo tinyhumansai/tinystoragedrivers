@@ -2,7 +2,7 @@
 
 use serde_json::json;
 
-use super::{fails, ok, unique};
+use super::{empty, fails, ok, unique};
 use crate::backend::StorageBackend;
 use crate::document::Precondition;
 use crate::error::ErrorKind;
@@ -70,14 +70,20 @@ pub(super) async fn run(backend: &dyn StorageBackend) {
         0,
         "streams leak"
     );
-    assert!(ok(b.streams().streams(&stream).await, "b list").is_empty());
+    empty(
+        &ok(b.streams().streams(&stream).await, "b list"),
+        "expected nothing",
+    );
 
     ok(a.blobs().put(&key, vec![1], None).await, "a blob");
     assert!(
         ok(b.blobs().get(&key).await, "b blob").is_none(),
         "blobs leak"
     );
-    assert!(ok(b.blobs().list(&key).await, "b list blobs").is_empty());
+    empty(
+        &ok(b.blobs().list(&key).await, "b list blobs"),
+        "expected nothing",
+    );
 
     assert_eq!(b.scope().as_str(), "conformance-b");
 }

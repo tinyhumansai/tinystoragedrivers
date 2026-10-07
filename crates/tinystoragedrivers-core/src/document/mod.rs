@@ -245,6 +245,11 @@ pub trait DocumentStoreExt: DocumentStore {
             let page = self.query(collection, &query).await?;
             out.extend(page.items);
             match page.next {
+                // A driver that hands back the cursor it was given would loop
+                // forever; treat that as the driver bug it is.
+                Some(cursor) if query.cursor.as_ref() == Some(&cursor) => {
+                    return Err(StorageError::backend("query paging did not advance"));
+                }
                 Some(cursor) => query.cursor = Some(cursor),
                 None => return Ok(out),
             }

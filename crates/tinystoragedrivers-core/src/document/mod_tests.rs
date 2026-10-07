@@ -22,8 +22,8 @@ fn docs() -> std::sync::Arc<dyn DocumentStore> {
 #[test]
 fn versions_start_at_one_and_rise() {
     assert_eq!(Version::FIRST, Version(1));
-    assert_eq!(Version(1).next(), Version(2));
-    assert_eq!(Version(u64::MAX).next(), Version(u64::MAX));
+    assert_eq!(Version(1).next(), Some(Version(2)));
+    assert_eq!(Version(u64::MAX).next(), None);
 }
 
 #[test]
@@ -269,13 +269,8 @@ async fn optional_operations_default_to_unsupported() {
         Version::FIRST
     );
     assert!(!none.delete("c", "i", Precondition::None).await.unwrap());
-    assert!(
-        none.query("c", &Query::all())
-            .await
-            .unwrap()
-            .items
-            .is_empty()
-    );
+    assert_eq!(none.query("c", &Query::all()).await.unwrap().items.len(), 0);
+
     assert_eq!(none.count("c", &Filter::All).await.unwrap(), 0);
     assert_eq!(none.delete_where("c", &Filter::All).await.unwrap(), 0);
     assert!(
@@ -288,4 +283,125 @@ async fn optional_operations_default_to_unsupported() {
         .await
         .unwrap();
     none.drop_collection("c").await.unwrap();
+}
+
+#[test]
+fn collection_declarations_merge() {
+    let first = CollectionSpec::new("users")
+        .index(IndexSpec::new("by_email", ["email"]).unique())
+        .searchable(["name"]);
+    let second = CollectionSpec::new("users")
+        .index(IndexSpec::new("by_team", ["team"]))
+        .ttl("expires_at")
+        .searchable(["bio", "name"]);
+    let merged = first.merge(&second).unwrap();
+    let names: Vec<_> = merged.indexes.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(names, ["by_email", "by_team"], "earlier indexes survive");
+    assert_eq!(merged.ttl_field.as_deref(), Some("expires_at"));
+    assert_eq!(merged.search.unwrap().fields, ["name", "bio"]);
+
+    let base = first.merge(&CollectionSpec::new("users")).unwrap();
+    assert_eq!(base, first, "a bare redeclaration changes nothing");
+    assert!(
+        base.merge(&first).is_ok(),
+        "redeclaring the same index is fine"
+    );
+
+    let clash = CollectionSpec::new("users").index(IndexSpec::new("by_email", ["mail"]));
+    assert_eq!(
+        first.merge(&clash).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    let ttl_a = CollectionSpec::new("users").ttl("a");
+    let ttl_b = CollectionSpec::new("users").ttl("b");
+    assert!(ttl_a.merge(&ttl_b).is_err(), "expiry field cannot change");
+    assert!(ttl_a.merge(&ttl_a).is_ok());
+    assert!(first.merge(&CollectionSpec::new("other")).is_err());
+}
+
+#[test]
+fn zero_page_sizes_are_rejected() {
+    assert_eq!(
+        Query::all().limit(0).validate().unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    assert!(Query::all().limit(1).validate().is_ok());
+    assert!(Query::filter(Filter::eq("", 1)).validate().is_err());
+}
+
+#[derive(Debug)]
+struct Stuck;
+
+#[async_trait::async_trait]
+impl DocumentStore for Stuck {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::none()
+    }
+    async fn ensure_collection(&self, _: &CollectionSpec) -> Result<()> {
+        Ok(())
+    }
+    async fn get(&self, _: &str, _: &str) -> Result<Option<Versioned<Value>>> {
+        Ok(None)
+    }
+    async fn put(&self, _: &str, _: &str, _: Value, _: Precondition) -> Result<Version> {
+        Ok(Version::FIRST)
+    }
+    async fn delete(&self, _: &str, _: &str, _: Precondition) -> Result<bool> {
+        Ok(false)
+    }
+    async fn query(&self, _: &str, _: &Query) -> Result<Page<Versioned<Value>>> {
+        Ok(Page {
+            items: Vec::new(),
+            next: Some(Cursor("same".into())),
+        })
+    }
+    async fn count(&self, _: &str, _: &Filter) -> Result<u64> {
+        Ok(0)
+    }
+    async fn delete_where(&self, _: &str, _: &Filter) -> Result<u64> {
+        Ok(0)
+    }
+    async fn claim(
+        &self,
+        _: &str,
+        _: &Filter,
+        _: &[Sort],
+        _: &Value,
+    ) -> Result<Option<Versioned<Value>>> {
+        Ok(None)
+    }
+    async fn drop_collection(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn query_all_refuses_a_cursor_that_never_advances() {
+    let stuck = Stuck;
+    let error = stuck.query_all("c", &Query::all()).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
+    assert!(stuck.get("c", "i").await.unwrap().is_none());
+    assert_eq!(
+        stuck
+            .put("c", "i", json!({}), Precondition::None)
+            .await
+            .unwrap(),
+        Version::FIRST
+    );
+    assert!(!stuck.delete("c", "i", Precondition::None).await.unwrap());
+    assert_eq!(stuck.count("c", &Filter::All).await.unwrap(), 0);
+    assert_eq!(stuck.delete_where("c", &Filter::All).await.unwrap(), 0);
+    assert!(
+        stuck
+            .claim("c", &Filter::All, &[], &json!({}))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    stuck
+        .ensure_collection(&CollectionSpec::new("c"))
+        .await
+        .unwrap();
+    stuck.drop_collection("c").await.unwrap();
+    assert!(stuck.capabilities().iter().next().is_none());
 }

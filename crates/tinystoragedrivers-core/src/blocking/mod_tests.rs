@@ -56,9 +56,26 @@ fn reports_a_stopped_bridge() {
 
 #[test]
 fn startup_failures_keep_their_cause() {
-    use std::error::Error as _;
     let error = startup_error("cannot start")(std::io::Error::other("no threads"));
     assert_eq!(error.kind(), ErrorKind::Backend);
     assert_eq!(error.message(), "cannot start");
-    assert_eq!(error.source().unwrap().to_string(), "no threads");
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        "no threads"
+    );
+}
+
+#[test]
+fn dropping_every_handle_lets_in_flight_work_finish() {
+    let bridge = Blocking::new().unwrap();
+    let (release, gate) = tokio::sync::oneshot::channel::<()>();
+    let (reply, done) = std_mpsc::sync_channel(1);
+    let job: Job = Box::pin(async move {
+        let _ = gate.await;
+        let _ = reply.send("finished");
+    });
+    bridge.jobs.send(job).unwrap();
+    drop(bridge);
+    release.send(()).unwrap();
+    assert_eq!(done.recv().unwrap(), "finished");
 }

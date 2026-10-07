@@ -83,6 +83,11 @@ fn fails<T: std::fmt::Debug>(result: Result<T>, kind: ErrorKind, check: &str) {
     }
 }
 
+/// Assert a listing came back empty, showing what it held otherwise.
+fn empty<T: std::fmt::Debug>(items: &[T], check: &str) {
+    assert_eq!(items.len(), 0, "{check}: expected nothing, got {items:?}");
+}
+
 /// Whether the handles' driver claims `capability`.
 fn has(storage: &ScopedStorage, capability: Capability) -> bool {
     storage.documents().capabilities().contains(capability)

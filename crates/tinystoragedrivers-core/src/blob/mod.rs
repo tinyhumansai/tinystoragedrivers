@@ -97,9 +97,9 @@ pub fn validate_blob_key(key: &str) -> Result<()> {
         .split('/')
         .any(|segment| segment.is_empty() || segment == "." || segment == "..")
     {
-        return Err(StorageError::invalid_input(format!(
-            "blob key `{key}` has an empty, `.` or `..` segment"
-        )));
+        return Err(StorageError::invalid_input(
+            "blob key has an empty, `.` or `..` segment",
+        ));
     }
     Ok(())
 }

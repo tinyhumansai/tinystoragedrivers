@@ -132,9 +132,13 @@ impl DbState {
             .or_default();
         // Versions keep rising across expiry, so a stale CAS on a re-created
         // document still fails.
-        let version = docs
-            .get(id)
-            .map_or(Version::FIRST, |stored| stored.version.next());
+        let version = match docs.get(id) {
+            None => Version::FIRST,
+            Some(stored) => stored
+                .version
+                .next()
+                .ok_or_else(|| StorageError::backend("document version space is exhausted"))?,
+        };
         docs.insert(id.to_owned(), StoredDoc { version, doc });
         Ok(version)
     }

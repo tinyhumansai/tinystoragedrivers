@@ -93,9 +93,8 @@ impl StorageConfig {
     }
 
     fn parse_mongo(url: &str) -> Result<Self> {
-        let after_scheme = url.split_once("://").map_or("", |(_, rest)| rest);
-        let path = after_scheme.split_once('/').map_or("", |(_, path)| path);
-        let database = path.split(['?', '/']).next().unwrap_or_default();
+        let path = split_uri(url).map_or("", |parts| parts.path);
+        let database = path.split('/').next().unwrap_or_default();
         if database.is_empty() {
             return Err(StorageError::invalid_input(format!(
                 "MongoDB URL `{}` names no database; add one as the path, e.g. mongodb://host/openhuman",
@@ -130,20 +129,82 @@ fn non_empty_path(path: &str, driver: &str) -> Result<PathBuf> {
     }
 }
 
-/// Replace the password in `scheme://user:password@host` with `***`.
+/// The pieces of `scheme://[userinfo@]hosts[/path][?query]`.
+struct UriParts<'a> {
+    scheme: &'a str,
+    userinfo: Option<&'a str>,
+    hosts: &'a str,
+    path: &'a str,
+    query: Option<&'a str>,
+}
+
+/// Split a connection URI without trusting the credentials to be
+/// percent-encoded: the userinfo ends at the *last* `@` before the query, so a
+/// stray `/` or `@` inside a password cannot move the boundary.
+fn split_uri(url: &str) -> Option<UriParts<'_>> {
+    let (scheme, rest) = url.split_once("://")?;
+    let (before_query, query) = match rest.split_once('?') {
+        Some((head, query)) => (head, Some(query)),
+        None => (rest, None),
+    };
+    let (userinfo, after_userinfo) = match before_query.rsplit_once('@') {
+        Some((userinfo, tail)) => (Some(userinfo), tail),
+        None => (None, before_query),
+    };
+    let (hosts, path) = after_userinfo
+        .split_once('/')
+        .unwrap_or((after_userinfo, ""));
+    Some(UriParts {
+        scheme,
+        userinfo,
+        hosts,
+        path,
+        query,
+    })
+}
+
+/// Query options whose values are credentials (AWS session tokens ride in
+/// `authMechanismProperties`).
+const SECRET_OPTIONS: [&str; 3] = [
+    "authmechanismproperties",
+    "tlscertificatekeyfilepassword",
+    "password",
+];
+
+/// Hide every credential in a connection URI: the password, and the value of
+/// any option in [`SECRET_OPTIONS`].
 fn redact(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
+    let Some(parts) = split_uri(url) else {
         return url.to_owned();
     };
-    let authority_end = rest.find('/').unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(authority_end);
-    let Some((userinfo, host)) = authority.rsplit_once('@') else {
-        return url.to_owned();
-    };
-    match userinfo.split_once(':') {
-        Some((user, _)) => format!("{scheme}://{user}:***@{host}{tail}"),
-        None => url.to_owned(),
+    let mut out = format!("{}://", parts.scheme);
+    if let Some(userinfo) = parts.userinfo {
+        let user = userinfo.split_once(':').map_or(userinfo, |(user, _)| user);
+        out.push_str(user);
+        if userinfo.contains(':') {
+            out.push_str(":***");
+        }
+        out.push('@');
     }
+    out.push_str(parts.hosts);
+    if !parts.path.is_empty() || parts.query.is_some() {
+        out.push('/');
+        out.push_str(parts.path);
+    }
+    if let Some(query) = parts.query {
+        out.push('?');
+        let options: Vec<String> = query
+            .split('&')
+            .map(|option| match option.split_once('=') {
+                Some((key, _)) if SECRET_OPTIONS.contains(&key.to_ascii_lowercase().as_str()) => {
+                    format!("{key}=***")
+                }
+                _ => option.to_owned(),
+            })
+            .collect();
+        out.push_str(&options.join("&"));
+    }
+    out
 }
 
 impl fmt::Display for StorageConfig {
@@ -178,8 +239,8 @@ pub async fn open(config: &StorageConfig) -> Result<Arc<dyn StorageBackend>> {
     match config {
         StorageConfig::Memory => Ok(Arc::new(MemoryStorage::new())),
         other => Err(StorageError::invalid_input(format!(
-            "storage URL `{other}` needs the `{driver}` driver; enable the `{driver}` feature of tinystoragedrivers",
-            driver = other.driver()
+            "storage URL `{other}` needs the `{}` driver, which is not available in this build of tinystoragedrivers",
+            other.driver()
         ))),
     }
 }

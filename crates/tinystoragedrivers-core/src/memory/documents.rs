@@ -1,5 +1,7 @@
 //! [`DocumentStore`] for the in-memory driver.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -66,17 +68,31 @@ impl MemoryDocuments {
     }
 }
 
-/// Decode an offset cursor issued by [`MemoryDocuments::query`].
-fn parse_cursor(cursor: Option<&Cursor>) -> Result<usize> {
-    cursor.map_or(Ok(0), |cursor| {
-        cursor
-            .0
-            .strip_prefix("mem:")
-            .and_then(|offset| offset.parse().ok())
-            .ok_or_else(|| {
-                StorageError::invalid_input("cursor was not issued by the memory driver")
-            })
-    })
+/// A fingerprint of everything that decides a query's result order, so a
+/// cursor only resumes the query that issued it.
+pub(super) fn fingerprint(collection: &str, query: &Query) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    collection.hash(&mut hasher);
+    serde_json::to_string(&query.filter)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    serde_json::to_string(&query.sort)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Decode an offset cursor issued by [`MemoryDocuments::query`] for this query.
+fn parse_cursor(collection: &str, query: &Query) -> Result<usize> {
+    let Some(cursor) = &query.cursor else {
+        return Ok(0);
+    };
+    let expected = format!("mem:{:016x}:", fingerprint(collection, query));
+    cursor
+        .0
+        .strip_prefix(&expected)
+        .and_then(|offset| offset.parse().ok())
+        .ok_or_else(|| StorageError::invalid_input("cursor was not issued for this query"))
 }
 
 #[async_trait]
@@ -88,7 +104,11 @@ impl DocumentStore for MemoryDocuments {
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
         spec.validate()?;
         let mut state = self.db.lock()?;
-        state.specs.insert(spec.name.clone(), spec.clone());
+        let merged = match state.specs.get(&spec.name) {
+            Some(existing) => existing.merge(spec)?,
+            None => spec.clone(),
+        };
+        state.specs.insert(spec.name.clone(), merged);
         Ok(())
     }
 
@@ -118,14 +138,16 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
-        let start = parse_cursor(query.cursor.as_ref())?;
+        query.validate()?;
+        let start = parse_cursor(collection, query)?;
         let state = self.db.lock()?;
         let found = self.matching(&state, collection, &query.filter, &query.sort)?;
         let end = query.limit.map_or(found.len(), |limit| {
             start.saturating_add(limit).min(found.len())
         });
         let items = found.get(start..end).map(<[_]>::to_vec).unwrap_or_default();
-        let next = (end < found.len()).then(|| Cursor(format!("mem:{end}")));
+        let next = (end < found.len())
+            .then(|| Cursor(format!("mem:{:016x}:{end}", fingerprint(collection, query))));
         Ok(Page { items, next })
     }
 
@@ -179,7 +201,13 @@ impl DocumentStore for MemoryDocuments {
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
         let now = self.now();
         let mut state = self.db.lock()?;
-        let mut draft = state.clone();
+        // A batch only writes documents; copying the rest would cost time
+        // proportional to every stored stream and blob.
+        let mut draft = DbState {
+            specs: state.specs.clone(),
+            docs: state.docs.clone(),
+            ..DbState::default()
+        };
         let scope = self.scope.as_str();
         let mut results = Vec::with_capacity(ops.len());
         for op in ops {
@@ -201,7 +229,7 @@ impl DocumentStore for MemoryDocuments {
                 },
             });
         }
-        *state = draft;
+        state.docs = draft.docs;
         Ok(results)
     }
 
@@ -210,9 +238,9 @@ impl DocumentStore for MemoryDocuments {
         let state = self.db.lock()?;
         let spec = state.spec(collection);
         let Some(search) = spec.search else {
-            return Err(StorageError::invalid_input(format!(
-                "collection `{collection}` declares no search fields"
-            )));
+            return Err(StorageError::invalid_input(
+                "this collection declares no search fields",
+            ));
         };
         let wanted = value::tokens(&Value::String(text.to_owned()));
         if wanted.is_empty() {

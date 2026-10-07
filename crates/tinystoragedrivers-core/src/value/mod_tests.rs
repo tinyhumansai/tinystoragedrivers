@@ -79,3 +79,27 @@ fn tokens_split_and_lowercase_every_string() {
     found.sort();
     assert_eq!(found, ["hello", "lang", "rust", "world"]);
 }
+
+#[test]
+fn mixed_integers_and_floats_compare_exactly() {
+    // 2^53 + 1 is not representable as f64; it must still differ from 2^53.
+    let big = json!(9_007_199_254_740_993_u64);
+    assert_eq!(
+        compare(&big, &json!(9_007_199_254_740_992.0)),
+        Ordering::Greater
+    );
+    assert_eq!(
+        compare(&json!(9_007_199_254_740_992.0), &big),
+        Ordering::Less
+    );
+    assert!(!equal(&big, &json!(9_007_199_254_740_992.0)));
+    assert!(equal(&json!(3), &json!(3.0)));
+    assert_eq!(compare(&json!(3), &json!(3.5)), Ordering::Less);
+    assert_eq!(compare(&json!(-3), &json!(-3.5)), Ordering::Greater);
+    assert_eq!(compare(&json!(u64::MAX), &json!(1e30)), Ordering::Less);
+    assert_eq!(compare(&json!(i64::MIN), &json!(-1e30)), Ordering::Greater);
+    assert_eq!(compare(&json!(i64::MIN), &json!(-1e40)), Ordering::Greater);
+    assert_eq!(compare(&json!(0), &json!(1e40)), Ordering::Less);
+    assert_eq!(compare_integer_float(0, f64::NAN), Ordering::Less);
+    assert_eq!(compare(&json!(1.5), &json!(2.5)), Ordering::Less);
+}

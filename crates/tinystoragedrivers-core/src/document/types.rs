@@ -25,10 +25,14 @@ impl Version {
     /// The version of a freshly created document.
     pub const FIRST: Self = Self(1);
 
-    /// The version after this one.
+    /// The version after this one, or `None` once the version space is
+    /// exhausted. A driver must fail the write rather than reuse a version.
     #[must_use]
-    pub const fn next(self) -> Self {
-        Self(self.0.saturating_add(1))
+    pub const fn next(self) -> Option<Self> {
+        match self.0.checked_add(1) {
+            Some(next) => Some(Self(next)),
+            None => None,
+        }
     }
 }
 
@@ -178,6 +182,56 @@ impl CollectionSpec {
         self
     }
 
+    /// Combine an existing declaration with a newer one for the same
+    /// collection: indexes and search fields accumulate, and the expiry field
+    /// is kept or added.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) when the
+    /// names differ, when an index name is redeclared with different fields or
+    /// uniqueness, or when the expiry field changes.
+    pub fn merge(&self, newer: &CollectionSpec) -> Result<CollectionSpec> {
+        if self.name != newer.name {
+            return Err(StorageError::invalid_input(
+                "cannot merge declarations of different collections",
+            ));
+        }
+        let mut merged = self.clone();
+        for index in &newer.indexes {
+            match merged.indexes.iter().find(|have| have.name == index.name) {
+                Some(have) if have == index => {}
+                Some(_) => {
+                    return Err(StorageError::invalid_input(format!(
+                        "index `{}` is already declared differently",
+                        index.name
+                    )));
+                }
+                None => merged.indexes.push(index.clone()),
+            }
+        }
+        match (&merged.ttl_field, &newer.ttl_field) {
+            (Some(have), Some(want)) if have != want => {
+                return Err(StorageError::invalid_input(
+                    "the expiry field of a collection cannot change",
+                ));
+            }
+            (None, Some(want)) => merged.ttl_field = Some(want.clone()),
+            _ => {}
+        }
+        if let Some(newer_search) = &newer.search {
+            let search = merged
+                .search
+                .get_or_insert_with(|| SearchSpec { fields: Vec::new() });
+            for field in &newer_search.fields {
+                if !search.fields.contains(field) {
+                    search.fields.push(field.clone());
+                }
+            }
+        }
+        Ok(merged)
+    }
+
     /// Check the name, index names and field paths.
     ///
     /// # Errors
@@ -234,9 +288,9 @@ pub fn validate_collection(name: &str) -> Result<()> {
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
     {
-        return Err(StorageError::invalid_input(format!(
-            "collection name `{name}` may only contain ASCII letters, digits, `_`, `-` and `.`"
-        )));
+        return Err(StorageError::invalid_input(
+            "collection names may only contain ASCII letters, digits, `_`, `-` and `.`",
+        ));
     }
     if name.starts_with(RESERVED_PREFIX) {
         return Err(StorageError::invalid_input(format!(
@@ -338,6 +392,21 @@ impl Query {
     pub fn limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
         self
+    }
+
+    /// Reject a query no driver can page through: an untranslatable filter or
+    /// a zero page size (which would never advance).
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput).
+    pub fn validate(&self) -> Result<()> {
+        if self.limit == Some(0) {
+            return Err(StorageError::invalid_input(
+                "query limit must be at least 1",
+            ));
+        }
+        self.filter.validate()
     }
 
     /// Continue from a previous page.

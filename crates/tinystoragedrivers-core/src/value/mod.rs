@@ -90,16 +90,51 @@ pub fn compare(a: &Value, b: &Value) -> Ordering {
     }
 }
 
+/// An integer-backed JSON number, widened so `i64` and `u64` share a type.
+fn as_integer(n: &serde_json::Number) -> Option<i128> {
+    n.as_i64()
+        .map(i128::from)
+        .or_else(|| n.as_u64().map(i128::from))
+}
+
 fn compare_numbers(x: &serde_json::Number, y: &serde_json::Number) -> Ordering {
-    if let (Some(a), Some(b)) = (x.as_i64(), y.as_i64()) {
-        return a.cmp(&b);
+    match (as_integer(x), as_integer(y)) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(a), None) => compare_integer_float(a, y.as_f64().unwrap_or(f64::NAN)),
+        (None, Some(b)) => compare_integer_float(b, x.as_f64().unwrap_or(f64::NAN)).reverse(),
+        (None, None) => {
+            let a = x.as_f64().unwrap_or(f64::NAN);
+            let b = y.as_f64().unwrap_or(f64::NAN);
+            a.total_cmp(&b)
+        }
     }
-    if let (Some(a), Some(b)) = (x.as_u64(), y.as_u64()) {
-        return a.cmp(&b);
+}
+
+/// Compare an integer with a float exactly, without rounding the integer to
+/// `f64` (which merges distinct values above 2^53).
+fn compare_integer_float(int: i128, float: f64) -> Ordering {
+    // Every JSON integer fits in [-2^63, 2^64), well inside ±2^100.
+    const BOUND: f64 = 1.267_650_600_228_229_4e30;
+    if float.is_nan() {
+        return Ordering::Less;
     }
-    let a = x.as_f64().unwrap_or(f64::NAN);
-    let b = y.as_f64().unwrap_or(f64::NAN);
-    a.total_cmp(&b)
+    if float >= BOUND {
+        return Ordering::Less;
+    }
+    if float <= -BOUND {
+        return Ordering::Greater;
+    }
+    let floor = float.floor();
+    // `floor` is integral and inside ±2^100, so the cast is exact.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "floor is integral and bounded well inside the i128 range"
+    )]
+    let whole = floor as i128;
+    match int.cmp(&whole) {
+        Ordering::Equal if float > floor => Ordering::Less,
+        other => other,
+    }
 }
 
 /// Whether two values are equal under [`compare`] (so `1` equals `1.0`).

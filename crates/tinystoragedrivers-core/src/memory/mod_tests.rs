@@ -65,11 +65,12 @@ async fn query_pages_past_the_end_are_empty() {
     docs.put("c", "a", json!({}), Precondition::None)
         .await
         .unwrap();
+    let past_end = format!("mem:{:016x}:9", documents::fingerprint("c", &Query::all()));
     let page = docs
-        .query("c", &Query::all().after(crate::Cursor("mem:9".into())))
+        .query("c", &Query::all().after(crate::Cursor(past_end)))
         .await
         .unwrap();
-    assert!(page.items.is_empty());
+    assert_eq!(page.items.len(), 0);
     assert!(page.next.is_none());
     let error = docs
         .query("c", &Query::all().after(crate::Cursor("mem:x".into())))
@@ -91,7 +92,7 @@ async fn search_ignores_text_without_tokens() {
     docs.put("notes", "a", json!({"t": "hello"}), Precondition::None)
         .await
         .unwrap();
-    assert!(docs.search("notes", "  ,, ", 5).await.unwrap().is_empty());
+    assert_eq!(docs.search("notes", "  ,, ", 5).await.unwrap().len(), 0);
 }
 
 #[test]
@@ -115,4 +116,93 @@ fn a_poisoned_lock_is_a_backend_error() {
     })
     .join();
     assert_eq!(db.lock().unwrap_err().kind(), ErrorKind::Backend);
+}
+
+#[tokio::test]
+async fn cursors_only_resume_their_own_query() {
+    let docs = MemoryStorage::new()
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    for id in ["a", "b", "c"] {
+        docs.put("c", id, json!({"n": 1}), Precondition::None)
+            .await
+            .unwrap();
+    }
+    let page = docs.query("c", &Query::all().limit(1)).await.unwrap();
+    let cursor = page.next.unwrap();
+    let other = Query::filter(Filter::eq("n", 1))
+        .limit(1)
+        .after(cursor.clone());
+    assert_eq!(
+        docs.query("c", &other).await.unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        docs.query("d", &Query::all().limit(1).after(cursor.clone()))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    let same = Query::all().limit(1).after(cursor);
+    assert_eq!(docs.query("c", &same).await.unwrap().items[0].id, "b");
+    assert_eq!(
+        docs.query("c", &Query::all().limit(0))
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+}
+
+#[tokio::test]
+async fn redeclaring_a_collection_keeps_its_unique_index() {
+    let docs = MemoryStorage::new()
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .clone();
+    docs.ensure_collection(
+        &CollectionSpec::new("users").index(crate::IndexSpec::new("by_email", ["email"]).unique()),
+    )
+    .await
+    .unwrap();
+    docs.ensure_collection(&CollectionSpec::new("users").ttl("expires_at"))
+        .await
+        .unwrap();
+    docs.put("users", "a", json!({"email": "x"}), Precondition::None)
+        .await
+        .unwrap();
+    let error = docs
+        .put("users", "b", json!({"email": "x"}), Precondition::None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+    let clash = CollectionSpec::new("users").index(crate::IndexSpec::new("by_email", ["mail"]));
+    assert_eq!(
+        docs.ensure_collection(&clash).await.unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
+}
+
+#[test]
+fn an_exhausted_version_fails_the_write() {
+    let mut state = state::DbState::default();
+    state
+        .docs
+        .entry(("local".into(), "c".into()))
+        .or_default()
+        .insert(
+            "max".into(),
+            state::StoredDoc {
+                version: crate::Version(u64::MAX),
+                doc: json!({}),
+            },
+        );
+    let error = state
+        .put("local", "c", "max", json!({}), Precondition::None, 0)
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
 }

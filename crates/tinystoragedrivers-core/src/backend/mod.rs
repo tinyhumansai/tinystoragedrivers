@@ -59,9 +59,9 @@ pub fn validate_database(name: &str) -> Result<()> {
     if ok {
         Ok(())
     } else {
-        Err(StorageError::invalid_input(format!(
-            "database name `{name}` must be 1 to 64 lowercase ASCII letters, digits, `_` or `-`"
-        )))
+        Err(StorageError::invalid_input(
+            "database name must be 1 to 64 lowercase ASCII letters, digits, `_` or `-`",
+        ))
     }
 }
 
