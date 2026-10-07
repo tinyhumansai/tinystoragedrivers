@@ -14,10 +14,10 @@ publish = false
 [dependencies]
 tinystoragedrivers-core = { workspace = true }
 # SQLite with the bundled amalgamation (FTS5 and JSON functions included).
-# Pinned exactly: `libsqlite3-sys` is a `links = "sqlite3"` crate, so every
-# crate in a host's graph must resolve the same version, and OpenHuman pins
-# 0.40.2.
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
+# `libsqlite3-sys` is a `links = "sqlite3"` crate, so every crate in a host's
+# graph must resolve one version; a caret requirement lets Cargo unify with
+# the host's own pin (OpenHuman pins 0.40.2).
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde_json = { workspace = true }
 # Database calls run on the blocking pool so they never stall a runtime
 # worker.

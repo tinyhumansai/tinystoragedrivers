@@ -103,20 +103,15 @@ impl BlobStore for SqliteBlobs {
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
         validate_blob_key(key)?;
-        let Some(head) = self.head(key).await? else {
-            return Ok(None);
-        };
-        let len = usize::try_from(head.len).unwrap_or(usize::MAX);
-        let range = clamp_range(&range, len)?;
-        if range.is_empty() {
-            return Ok(Some(Vec::new()));
-        }
+        // One statement reads and clamps (`substr` stops at the end of the
+        // blob), so a concurrent replace cannot mix two versions of it.
+        clamp_range(&range, 0)?;
         let sql = format!(
             "SELECT substr(bytes, ?3, ?4) FROM {} WHERE scope = ?1 AND key = ?2",
             self.table()
         );
-        let start = i64::try_from(range.start + 1).unwrap_or(i64::MAX);
-        let count = i64::try_from(range.len()).unwrap_or(i64::MAX);
+        let start = i64::try_from(range.start.saturating_add(1)).unwrap_or(i64::MAX);
+        let count = i64::try_from(range.end - range.start).unwrap_or(i64::MAX);
         let (scope, key) = (self.scope.clone(), key.to_owned());
         self.db
             .run(move |conn| {

@@ -67,11 +67,18 @@ pub(crate) fn declare(
     conn.execute(&sql, params![merged.name, serde_json::to_string(&merged)?])
         .map_err(during("declare collection"))?;
     for index in &merged.indexes {
-        let columns: Vec<String> = index
+        // An index is a performance hint: skip one whose paths SQLite cannot
+        // express; queries on it are evaluated in Rust either way.
+        let Some(columns) = index
             .fields
             .iter()
-            .map(|field| format!("json_extract(doc, {})", literal(&json_path(field))))
-            .collect();
+            .map(|field| {
+                json_path(field).map(|path| format!("json_extract(doc, {})", literal(&path)))
+            })
+            .collect::<Option<Vec<String>>>()
+        else {
+            continue;
+        };
         let sql = format!(
             "CREATE INDEX IF NOT EXISTS {name} ON {docs} (scope, {columns}) WHERE coll = {coll}",
             name = ident(&format!(

@@ -107,3 +107,38 @@ async fn a_panicking_call_is_reported_and_poisons_only_its_file() {
     let other = Db::open(&dir.path().join("q.db")).unwrap();
     other.run(|_| Ok(())).await.unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_file_shares_its_targets_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.db");
+    let target = Db::open(&real).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("alias.db")).unwrap();
+    let alias = Db::open(&dir.path().join("alias.db")).unwrap();
+    assert!(Arc::ptr_eq(&target, &alias));
+}
+
+#[test]
+fn a_panic_without_a_runtime_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::open(&dir.path().join("inline.db")).unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        futures_lite_block_on_result(db.run(|_| -> Result<()> { panic!("boom") }))
+    }));
+    let error = outcome.expect("the panic is caught by run").unwrap_err();
+    assert_eq!(error.message(), "sqlite call did not complete");
+}
+
+fn futures_lite_block_on_result<T>(
+    future: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    use std::task::{Context, Poll, Waker};
+    let mut future = std::pin::pin!(future);
+    let mut cx = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(value) = future.as_mut().poll(&mut cx) {
+            return value;
+        }
+    }
+}

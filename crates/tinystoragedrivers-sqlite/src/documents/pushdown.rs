@@ -29,15 +29,16 @@ fn pushable(value: &Value) -> Option<SqlValue> {
     }
 }
 
-/// The column expression for `field` and its parameters.
-fn column(field: &str) -> (String, Vec<SqlValue>) {
+/// The column expression for `field` and its parameters, or `None` when the
+/// path cannot be expressed in SQLite.
+fn column(field: &str) -> Option<(String, Vec<SqlValue>)> {
     if field == ID_FIELD {
-        ("id".to_owned(), Vec::new())
+        Some(("id".to_owned(), Vec::new()))
     } else {
-        (
+        Some((
             "json_extract(doc, ?)".to_owned(),
-            vec![SqlValue::Text(json_path(field))],
-        )
+            vec![SqlValue::Text(json_path(field)?)],
+        ))
     }
 }
 
@@ -49,7 +50,7 @@ pub(crate) fn clause(filter: &Filter) -> Option<Clause> {
             if field == ID_FIELD && !value.is_string() {
                 return None;
             }
-            let (expr, mut params) = column(field);
+            let (expr, mut params) = column(field)?;
             params.push(bound);
             Some(Clause {
                 sql: format!("{expr} = ?"),
@@ -61,7 +62,7 @@ pub(crate) fn clause(filter: &Filter) -> Option<Clause> {
             if bound.is_empty() || (field == ID_FIELD && !values.iter().all(Value::is_string)) {
                 return None;
             }
-            let (expr, mut params) = column(field);
+            let (expr, mut params) = column(field)?;
             let marks = vec!["?"; bound.len()].join(", ");
             params.extend(bound);
             Some(Clause {

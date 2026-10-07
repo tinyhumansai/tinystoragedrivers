@@ -24,8 +24,9 @@
 //! # }).unwrap();
 //! ```
 //!
-//! The crate pins `rusqlite` exactly (re-exported as [`rusqlite`]) because
-//! `libsqlite3-sys` may appear only once in a host's dependency graph.
+//! `rusqlite` is re-exported as [`rusqlite`] so owners of native tables use
+//! the same version: `libsqlite3-sys` may appear only once in a host's
+//! dependency graph.
 
 mod blobs;
 mod connection;

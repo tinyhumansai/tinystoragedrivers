@@ -52,6 +52,8 @@ fn leaves_everything_else_to_rust() {
         Filter::eq("a", "x").or(Filter::eq("b", "y")),
         Filter::eq("a", "x").negate(),
         Filter::gt("n", 1).and(Filter::lt("n", 3)),
+        Filter::eq("tags.0", "x"),
+        Filter::one_of("we\"ird", ["x"]),
     ] {
         assert_eq!(clause(&filter), None, "{filter:?}");
     }

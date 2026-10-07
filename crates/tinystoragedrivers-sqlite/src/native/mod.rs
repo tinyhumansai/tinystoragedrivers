@@ -111,27 +111,34 @@ impl SqliteNative {
                      ) WITHOUT ROWID"
                 ))
                 .map_err(during("migrate"))?;
-                let applied: i64 = conn
-                    .query_row(
-                        &format!("SELECT version FROM {MIGRATIONS_TABLE} WHERE owner = ?1"),
-                        [&owner],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(during("migrate"))?
-                    .unwrap_or(0);
-                let applied = usize::try_from(applied).unwrap_or(0);
-                if applied > steps.len() {
-                    return Err(StorageError::invalid_input(
-                        "the database schema is newer than this build",
-                    ));
-                }
-                for (index, step) in steps.iter().enumerate().skip(applied) {
+                // Read the recorded version inside each step's write
+                // transaction, so two processes migrating at once never both
+                // apply the same step.
+                loop {
                     let tx = conn
                         .transaction_with_behavior(TransactionBehavior::Immediate)
                         .map_err(during("migrate"))?;
+                    let applied: i64 = tx
+                        .query_row(
+                            &format!("SELECT version FROM {MIGRATIONS_TABLE} WHERE owner = ?1"),
+                            [&owner],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(during("migrate"))?
+                        .unwrap_or(0);
+                    let applied = usize::try_from(applied).unwrap_or(0);
+                    if applied > steps.len() {
+                        return Err(StorageError::invalid_input(
+                            "the database schema is newer than this build",
+                        ));
+                    }
+                    let Some(step) = steps.get(applied) else {
+                        tx.commit().map_err(during("migrate"))?;
+                        break;
+                    };
                     tx.execute_batch(step).map_err(during("migrate"))?;
-                    let version = i64::try_from(index + 1).unwrap_or(i64::MAX);
+                    let version = i64::try_from(applied + 1).unwrap_or(i64::MAX);
                     tx.execute(
                         &format!(
                             "INSERT INTO {MIGRATIONS_TABLE} (owner, version) VALUES (?1, ?2)

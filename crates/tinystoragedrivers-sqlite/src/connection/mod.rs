@@ -57,7 +57,10 @@ fn normalize(path: &Path) -> Result<PathBuf> {
     let name = path
         .file_name()
         .ok_or_else(|| StorageError::invalid_input("sqlite database path has no file name"))?;
-    Ok(parent.join(name))
+    let joined = parent.join(name);
+    // An existing file may be a symlink; key it by its target so every alias
+    // shares one connection. A new file is created at the joined path.
+    Ok(joined.canonicalize().unwrap_or(joined))
 }
 
 /// Map a filesystem failure while preparing the database location.
@@ -112,7 +115,10 @@ impl Db {
                 .spawn_blocking(move || db.run_now(f))
                 .await
                 .map_err(join_error)?,
-            Err(_) => db.run_now(f),
+            // Without a runtime the call runs here; catch a panic the same
+            // way the blocking pool would, so callers see one contract.
+            Err(_) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| db.run_now(f)))
+                .map_err(|_| StorageError::backend("sqlite call did not complete"))?,
         }
     }
 

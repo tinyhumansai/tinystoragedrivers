@@ -21,16 +21,26 @@ pub(crate) fn literal(text: &str) -> String {
     format!("'{}'", text.replace('\'', "''"))
 }
 
-/// The SQLite JSON path of a dotted field path: `owner.name` becomes
-/// `$."owner"."name"`.
-pub(crate) fn json_path(field: &str) -> String {
+/// The SQLite JSON path of a dotted field path (`owner.name` becomes
+/// `$."owner"."name"`), or `None` when SQLite cannot address it the way
+/// [`value::lookup`](tinystoragedrivers_core::value::lookup) does:
+///
+/// - a segment of digits is an array index on arrays and a key on objects,
+///   which no single SQLite path expresses;
+/// - SQLite's quoted path labels have no escape for `"` or `\`.
+///
+/// Callers fall back to evaluating such paths in Rust.
+pub(crate) fn json_path(field: &str) -> Option<String> {
     let mut path = String::from("$");
     for segment in field.split('.') {
+        if segment.bytes().all(|b| b.is_ascii_digit()) || segment.contains(['"', '\\']) {
+            return None;
+        }
         path.push_str(".\"");
-        path.push_str(&segment.replace('\\', "\\\\").replace('"', "\\\""));
+        path.push_str(segment);
         path.push('"');
     }
-    path
+    Some(path)
 }
 
 /// The table names of one (possibly prefixed) database.
