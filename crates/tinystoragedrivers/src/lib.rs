@@ -29,6 +29,14 @@
 //! SQLite, MongoDB and file drivers land as separate crates and are forwarded
 //! here behind `sqlite`, `mongodb` and `file` features.
 //!
+//! # Secrets
+//!
+//! With the `secrets` feature, [`secrets`] is the `tinystoragedrivers-secrets`
+//! crate: the `SecretStore` port for API keys and tokens, with drivers for
+//! memory, an encrypted `secrets.enc` file, and `enc2:` ciphertext in any
+//! [`DocumentStore`] under a per-scope key. The `keyring` feature adds the OS
+//! credential store. It has no URL form; a host builds the store it wants.
+//!
 //! This crate holds no repository for any particular record type; sessions,
 //! approvals and workflow runs belong to the crates that own them.
 
@@ -36,3 +44,7 @@ mod config;
 
 pub use config::{StorageConfig, open};
 pub use tinystoragedrivers_core::*;
+
+/// Encrypted secret storage (feature `secrets`).
+#[cfg(feature = "secrets")]
+pub use tinystoragedrivers_secrets as secrets;
