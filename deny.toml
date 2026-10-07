@@ -28,6 +28,14 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+# tiny-keccak is CC0-1.0 (a public-domain dedication, GPL-compatible). It is
+# only reached at build time, through the proc macros of the `mongodb` client
+# (mongodb-internal-macros -> macro_magic -> const-random-macro), so the
+# exception is scoped to that crate rather than allowing CC0 everywhere.
+[[licenses.exceptions]]
+crate = "tiny-keccak"
+allow = ["CC0-1.0"]
+
 [bans]
 # Duplicate versions bloat build times; review them rather than ignoring them.
 multiple-versions = "warn"

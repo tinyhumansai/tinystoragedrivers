@@ -8,7 +8,7 @@ on one small set of ports. The host chooses the backend once at boot, from a URL
 | --- | --- | --- |
 | Tests, stateless embedders | `memory` | in-process maps |
 | Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file per named database *(planned)* |
-| Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant *(planned)* |
+| Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant (feature `mongodb`) |
 | Plain files | `file:<dir>` | JSON and JSONL on disk *(planned)* |
 
 Drivers are separate crates. A host compiles in only the ones it enables, as
@@ -60,10 +60,11 @@ async fn demo() -> tinystoragedrivers::Result<()> {
 
 ```text
 crates/
-├── tinystoragedrivers-core/   # ports, Scope, filters, errors, memory driver,
-│                              # blocking bridge, conformance suite
-└── tinystoragedrivers/        # facade: StorageConfig URL parsing, open(),
-                               # driver features, re-exports the core
+├── tinystoragedrivers-core/    # ports, Scope, filters, errors, memory driver,
+│                               # blocking bridge, conformance suite
+├── tinystoragedrivers-mongodb/ # the MongoDB driver (feature `mongodb`)
+└── tinystoragedrivers/         # facade: StorageConfig URL parsing, open(),
+                                # driver features, re-exports the core
 ```
 
 Each driver gets its own crate (`tinystoragedrivers-sqlite`,
@@ -87,6 +88,17 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo build --all-targets --all-features
 cargo test --all-features
 .github/scripts/check-file-coverage.sh 90 target/coverage.json
+```
+
+The MongoDB driver's `live_*` tests run against the server named by
+`TSD_MONGO_URL` and skip without it. The coverage gate needs them, so run it
+with a single-node replica set up:
+
+```sh
+docker run -d --rm --name tsd-mongo -p 27017:27017 mongo:7 --replSet rs0 --bind_ip_all
+docker exec tsd-mongo mongosh --quiet --eval \
+  'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
+export TSD_MONGO_URL='mongodb://localhost:27017/tsd_test?directConnection=true'
 ```
 
 The design and its guarantees are in

@@ -25,9 +25,10 @@
 //! | URL | Driver | Feature |
 //! | --- | --- | --- |
 //! | `memory` | in-process maps | always |
+//! | `mongodb://…/<db>`, `mongodb+srv://…/<db>` | MongoDB, every record scoped to its tenant | `mongodb` |
 //!
-//! SQLite, MongoDB and file drivers land as separate crates and are forwarded
-//! here behind `sqlite`, `mongodb` and `file` features.
+//! SQLite and file drivers land as separate crates and are forwarded here
+//! behind `sqlite` and `file` features.
 //!
 //! This crate holds no repository for any particular record type; sessions,
 //! approvals and workflow runs belong to the crates that own them.

@@ -252,6 +252,10 @@ impl fmt::Debug for StorageConfig {
 pub async fn open(config: &StorageConfig) -> Result<Arc<dyn StorageBackend>> {
     match config {
         StorageConfig::Memory => Ok(Arc::new(MemoryStorage::new())),
+        #[cfg(feature = "mongodb")]
+        StorageConfig::MongoDb { uri, database } => Ok(Arc::new(
+            tinystoragedrivers_mongodb::MongoStorage::connect(uri, database).await?,
+        )),
         other => Err(StorageError::invalid_input(format!(
             "storage URL `{other}` needs the `{}` driver, which is not available in this build of tinystoragedrivers",
             other.driver()

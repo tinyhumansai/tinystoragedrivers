@@ -28,6 +28,8 @@ repository = "https://github.com/tinyhumansai/tinystoragedrivers"
 # release, and a pinned requirement here would stop resolving the moment it did.
 # Nothing in this workspace is published, so the path is the whole address.
 tinystoragedrivers-core = { path = "crates/tinystoragedrivers-core" }
+# The MongoDB driver. The facade forwards it behind its `mongodb` feature.
+tinystoragedrivers-mongodb = { path = "crates/tinystoragedrivers-mongodb" }
 # The ports are object-safe async traits (`Arc<dyn DocumentStore>`), which
 # native `async fn` in traits cannot express on the declared MSRV.
 async-trait = "0.1"
