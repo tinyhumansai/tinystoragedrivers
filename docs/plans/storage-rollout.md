@@ -26,7 +26,8 @@ ships on its own and is tagged before the next step depends on it.
 4. **`tinystoragedrivers-secrets`.** `SecretStore`, the `enc2:`
    ChaCha20-Poly1305 envelope (moved from OpenHuman with the byte format
    unchanged), `KeyProvider`, an OS keyring driver, and an encrypted-file
-   driver. Fixtures must decrypt existing secrets.
+   driver. Fixtures must decrypt existing secrets. Contract:
+   [`secret-storage.md`](../specs/secret-storage.md).
 5. **`tinystoragedrivers-mongodb`.**
    - **Scoping.** `_scope` is the first field of every index and is injected
      into every filter.

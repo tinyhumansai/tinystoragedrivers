@@ -18,7 +18,8 @@ deployment on MongoDB is impossible without rewriting every store.
 ## Outcome
 
 - One set of backend-neutral ports that every persisting crate builds on.
-- A driver per backend: memory, SQLite, MongoDB, files, and secrets. Each is
+- A driver per backend: memory, SQLite, MongoDB, files, and secrets (the
+  `SecretStore` contract is in [`secret-storage.md`](secret-storage.md)). Each is
   compiled in by Cargo feature and chosen at boot by URL.
 - The same behavior on every driver, enforced by one conformance suite.
 - Tenant isolation as a property of the port handle, not of each call site.
