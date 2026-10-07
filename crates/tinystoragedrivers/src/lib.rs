@@ -26,9 +26,10 @@
 //! | --- | --- | --- |
 //! | `memory` | in-process maps | always |
 //! | `sqlite:<dir>`, `sqlite:<file>.db`, `/abs/path` | SQLite ([`sqlite`]) | `sqlite` |
+//! | `file:<dir>` | JSON, JSONL and raw files under a directory | `file` |
 //!
-//! MongoDB and file drivers land as separate crates and are forwarded here
-//! behind `mongodb` and `file` features.
+//! The MongoDB driver lands as a separate crate and is forwarded here behind a
+//! `mongodb` feature.
 //!
 //! This crate holds no repository for any particular record type; sessions,
 //! approvals and workflow runs belong to the crates that own them.
