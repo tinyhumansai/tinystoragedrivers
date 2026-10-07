@@ -20,6 +20,10 @@ jobs:
   rust:
     name: Rust
     runs-on: ubuntu-latest
+    env:
+      # The MongoDB driver's `live_*` tests run against this server; the
+      # coverage gate counts them, so this job needs the server up.
+      TSD_MONGO_URL: mongodb://localhost:27017/tsd_test?directConnection=true
     steps:
       - uses: actions/checkout@v7
         with:
@@ -36,6 +40,9 @@ jobs:
           tool: cargo-llvm-cov
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Start a MongoDB replica set
+        run: .github/scripts/start-mongo-replset.sh 27017
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -81,6 +88,31 @@ jobs:
           name: coverage-json
           path: coverage.json
           if-no-files-found: ignore
+
+  mongodb:
+    name: MongoDB driver
+    runs-on: ubuntu-latest
+    env:
+      TSD_MONGO_URL: mongodb://localhost:27017/tsd_test?directConnection=true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # A single-node replica set, so transactions run too. Started by a step
+      # because a service container cannot pass `--replSet` to mongod.
+      - name: Start a MongoDB replica set
+        run: .github/scripts/start-mongo-replset.sh 27017
+
+      - name: Test the driver against MongoDB
+        run: cargo test -p tinystoragedrivers-mongodb --all-features
+
+      - name: Test the facade's mongodb feature
+        run: cargo test -p tinystoragedrivers --features mongodb
 
   docs:
     name: Docs

@@ -8,7 +8,7 @@ on one small set of ports. The host chooses the backend once at boot, from a URL
 | --- | --- | --- |
 | Tests, stateless embedders | `memory` | in-process maps |
 | Desktop and CLI | `sqlite:<workspace dir>` | SQLite, one file per named database (feature `sqlite`) |
-| Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant *(planned)* |
+| Cloud, multi-tenant | `mongodb://…/<db>` | MongoDB, every record scoped to its tenant (feature `mongodb`) |
 | Plain files | `file:<dir>` | JSON documents, JSONL streams and raw blobs on disk (`tinystoragedrivers-file`, feature `file`) |
 | Secrets | none (feature `secrets`, `keyring`) | `SecretStore`: OS keyring, encrypted `secrets.enc`, or `enc2:` ciphertext in any `DocumentStore` |
 
@@ -61,14 +61,15 @@ async fn demo() -> tinystoragedrivers::Result<()> {
 
 ```text
 crates/
-├── tinystoragedrivers-core/   # ports, Scope, filters, errors, memory driver,
-│                              # blocking bridge, conformance suite
-├── tinystoragedrivers-file/   # `file:<dir>`: JSON, JSONL and raw files
-├── tinystoragedrivers-sqlite/ # SQLite: generic tables, FTS5, native access
+├── tinystoragedrivers-core/    # ports, Scope, filters, errors, memory driver,
+│                               # blocking bridge, conformance suite
+├── tinystoragedrivers-file/    # `file:<dir>`: JSON, JSONL and raw files
+├── tinystoragedrivers-sqlite/  # SQLite: generic tables, FTS5, native access
+├── tinystoragedrivers-mongodb/ # MongoDB: multi-tenant, scope on every record
 ├── tinystoragedrivers-secrets/ # SecretStore port: memory, secrets.enc file,
-│                              # DocumentStore and OS keyring drivers
-└── tinystoragedrivers/        # facade: StorageConfig URL parsing, open(),
-                               # driver features, re-exports the core
+│                               # DocumentStore and OS keyring drivers
+└── tinystoragedrivers/         # facade: StorageConfig URL parsing, open(),
+                                # driver features, re-exports the core
 ```
 
 Each driver gets its own crate (`tinystoragedrivers-sqlite`,
@@ -92,6 +93,17 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo build --all-targets --all-features
 cargo test --all-features
 .github/scripts/check-file-coverage.sh 90 target/coverage.json
+```
+
+The MongoDB driver's `live_*` tests run against the server named by
+`TSD_MONGO_URL` and skip without it. The coverage gate needs them, so run it
+with a single-node replica set up:
+
+```sh
+docker run -d --rm --name tsd-mongo -p 27017:27017 mongo:7 --replSet rs0 --bind_ip_all
+docker exec tsd-mongo mongosh --quiet --eval \
+  'rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]})'
+export TSD_MONGO_URL='mongodb://localhost:27017/tsd_test?directConnection=true'
 ```
 
 The design and its guarantees are in

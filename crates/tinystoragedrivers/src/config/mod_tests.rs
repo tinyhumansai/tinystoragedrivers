@@ -105,7 +105,9 @@ async fn opens_memory_and_names_missing_features() {
     if cfg!(not(feature = "sqlite")) {
         missing.push("sqlite:/tmp/x");
     }
-    missing.push("mongodb://h/db");
+    if cfg!(not(feature = "mongodb")) {
+        missing.push("mongodb://h/db");
+    }
     if cfg!(not(feature = "file")) {
         missing.push("file:/tmp/x");
     }
@@ -189,4 +191,19 @@ fn a_question_mark_in_a_password_stays_hidden() {
         panic!("expected a MongoDB config")
     };
     assert_eq!(database, "db", "an @ in a query value is not userinfo");
+}
+
+#[cfg(feature = "mongodb")]
+#[tokio::test]
+async fn opens_a_mongodb_url_with_the_driver() {
+    // A port that is not a number fails the driver's own URI parse before
+    // any I/O, so this proves the URL reaches the driver without a network.
+    let config = StorageConfig::parse("mongodb://app:s3cret@h:notaport/db").unwrap();
+    let error = open(&config).await.map(|_| ()).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(
+        !error.message().contains("not available in this build"),
+        "the driver, not the missing-feature arm, answered: {error}"
+    );
+    assert!(!error.to_string().contains("s3cret"), "{error}");
 }

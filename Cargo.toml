@@ -39,6 +39,8 @@ tinystoragedrivers-sqlite = { path = "crates/tinystoragedrivers-sqlite" }
 # The `SecretStore` port and its drivers. The facade forwards it behind its
 # `secrets` feature; kept out of the core so the core links no cryptography.
 tinystoragedrivers-secrets = { path = "crates/tinystoragedrivers-secrets" }
+# The MongoDB driver. The facade forwards it behind its `mongodb` feature.
+tinystoragedrivers-mongodb = { path = "crates/tinystoragedrivers-mongodb" }
 # The ports are object-safe async traits (`Arc<dyn DocumentStore>`), which
 # native `async fn` in traits cannot express on the declared MSRV.
 async-trait = "0.1"

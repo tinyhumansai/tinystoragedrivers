@@ -20,6 +20,9 @@ tinystoragedrivers-file = { workspace = true, optional = true }
 tinystoragedrivers-sqlite = { workspace = true, optional = true }
 # The `SecretStore` port and its drivers, re-exported as `secrets`.
 tinystoragedrivers-secrets = { workspace = true, optional = true }
+# The MongoDB driver, compiled in only with the `mongodb` feature so a desktop
+# build never links a MongoDB client.
+tinystoragedrivers-mongodb = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The integration test runs the conformance suite through the facade.
@@ -44,6 +47,9 @@ file = ["dep:tinystoragedrivers-file"]
 secrets = ["dep:tinystoragedrivers-secrets"]
 # `secrets::KeyringSecrets`, over the native OS credential stores.
 keyring = ["secrets", "tinystoragedrivers-secrets/keyring"]
+# `mongodb://…/<db>` and `mongodb+srv://…/<db>` URLs: the multi-tenant MongoDB
+# driver.
+mongodb = ["dep:tinystoragedrivers-mongodb"]
 
 [lints]
 workspace = true

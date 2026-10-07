@@ -1,0 +1,38 @@
+[package]
+name = "tinystoragedrivers-mongodb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The MongoDB driver for tinystoragedrivers: one shared database, every record scoped to its tenant."
+readme = "README.md"
+keywords = ["storage", "database", "driver", "mongodb"]
+categories = ["database"]
+publish = false
+
+[dependencies]
+tinystoragedrivers-core = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+# The official MongoDB client. The feature set matches the `mongodb = "3.6"`
+# OpenHuman already links through tinyflows-adaptive (the crate's defaults
+# spelled out), so a cloud build carries one copy: BSON 2 (`compat-3-0-0`),
+# rustls on ring (never OpenSSL), and the DNS resolver `mongodb+srv://` needs.
+mongodb = { version = "3.6", default-features = false, features = [
+    "compat-3-0-0",
+    "rustls-tls",
+    "dns-resolver",
+] }
+# `AsyncWriteExt`/`AsyncReadExt` for GridFS upload and download streams, and
+# `TryStreamExt` to drain cursors. Already in the tree through `mongodb`.
+futures-util = { version = "0.3", default-features = false, features = ["io"] }
+
+[dev-dependencies]
+# The conformance suite, and the memory driver the differential test compares
+# against.
+tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

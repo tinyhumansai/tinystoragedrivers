@@ -260,6 +260,10 @@ pub async fn open(config: &StorageConfig) -> Result<Arc<dyn StorageBackend>> {
         StorageConfig::Sqlite { path } => Ok(Arc::new(
             tinystoragedrivers_sqlite::SqliteStorage::open(path)?,
         )),
+        #[cfg(feature = "mongodb")]
+        StorageConfig::MongoDb { uri, database } => Ok(Arc::new(
+            tinystoragedrivers_mongodb::MongoStorage::connect(uri, database).await?,
+        )),
         other => Err(StorageError::invalid_input(format!(
             "storage URL `{other}` needs the `{}` driver, which is not available in this build of tinystoragedrivers",
             other.driver()

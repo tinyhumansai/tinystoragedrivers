@@ -27,9 +27,7 @@
 //! | `memory` | in-process maps | always |
 //! | `sqlite:<dir>`, `sqlite:<file>.db`, `/abs/path` | SQLite ([`sqlite`]) | `sqlite` |
 //! | `file:<dir>` | JSON, JSONL and raw files under a directory | `file` |
-//!
-//! The MongoDB driver lands as a separate crate and is forwarded here behind a
-//! `mongodb` feature.
+//! | `mongodb://…/<db>`, `mongodb+srv://…/<db>` | MongoDB, every record scoped to its tenant | `mongodb` |
 //!
 //! # Secrets
 //!
@@ -54,3 +52,8 @@ pub use tinystoragedrivers_sqlite as sqlite;
 /// Encrypted secret storage (feature `secrets`).
 #[cfg(feature = "secrets")]
 pub use tinystoragedrivers_secrets as secrets;
+
+/// The MongoDB backend, for hosts that construct it directly (an injected
+/// clock, transactions turned off, expiry sweeps).
+#[cfg(feature = "mongodb")]
+pub use tinystoragedrivers_mongodb::MongoStorage;

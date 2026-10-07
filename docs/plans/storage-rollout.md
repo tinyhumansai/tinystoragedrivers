@@ -28,11 +28,14 @@ ships on its own and is tagged before the next step depends on it.
    unchanged), `KeyProvider`, an OS keyring driver, and an encrypted-file
    driver. Fixtures must decrypt existing secrets. Contract:
    [`secret-storage.md`](../specs/secret-storage.md).
-5. **`tinystoragedrivers-mongodb`.**
+5. **`tinystoragedrivers-mongodb`.** *(landed; design in
+   [`crates/tinystoragedrivers-mongodb/README.md`](../../crates/tinystoragedrivers-mongodb/README.md))*
    - **Scoping.** `_scope` is the first field of every index and is injected
      into every filter.
-   - **Streams.** Dense offsets via a unique index plus retry.
-   - **Claims** use `findOneAndUpdate`.
+   - **Streams.** Dense offsets via one segment document per append, a unique
+     `(_scope, stream, offset)` index, and retry.
+   - **Claims** pick the first match and commit it with a compare-and-swap on
+     its version, so the merge patch is applied with the reference semantics.
    - **Blobs** use GridFS.
    - **Topology.** Detect it to decide whether to report `Transactions`.
    - **CI.** A replica-set `services:` lane gated on `TSD_MONGO_URL`.
