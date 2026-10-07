@@ -16,6 +16,7 @@ pub(super) async fn run(storage: &ScopedStorage) {
     preconditions(storage).await;
     validation(storage).await;
     unique_indexes(storage).await;
+    recreation(storage).await;
     queries(storage).await;
     claims(storage).await;
     expiry(storage).await;
@@ -211,6 +212,56 @@ async fn unique_indexes(storage: &ScopedStorage) {
         docs.put(&coll, "d", json!({}), Precondition::None).await,
         "and so is a second one",
     );
+
+    let dup = unique("uniq_late");
+    for id in ["a", "b"] {
+        ok(
+            docs.put(&dup, id, json!({"email": "same"}), Precondition::None)
+                .await,
+            "seed duplicates",
+        );
+    }
+    fails(
+        docs.ensure_collection(
+            &CollectionSpec::new(&dup).index(IndexSpec::new("by_email", ["email"]).unique()),
+        )
+        .await,
+        ErrorKind::AlreadyExists,
+        "a unique index the stored documents already violate",
+    );
+}
+
+async fn recreation(storage: &ScopedStorage) {
+    let docs = storage.documents();
+    let coll = unique("recreate");
+    let v1 = ok(
+        docs.put(&coll, "a", json!({}), Precondition::None).await,
+        "create",
+    );
+    assert!(ok(
+        docs.delete(&coll, "a", Precondition::None).await,
+        "delete"
+    ));
+    let v2 = ok(
+        docs.put(&coll, "a", json!({}), Precondition::Absent).await,
+        "recreate",
+    );
+    assert!(
+        v2 > v1,
+        "a recreated document continues its version sequence"
+    );
+    fails(
+        docs.put(&coll, "a", json!({}), Precondition::Version(v1))
+            .await,
+        ErrorKind::Conflict,
+        "a compare-and-swap from before the deletion",
+    );
+    ok(docs.drop_collection(&coll).await, "drop");
+    let v3 = ok(
+        docs.put(&coll, "a", json!({}), Precondition::Absent).await,
+        "recreate after drop",
+    );
+    assert!(v3 > v2, "dropping a collection keeps version history");
 }
 
 async fn queries(storage: &ScopedStorage) {
@@ -332,7 +383,7 @@ async fn claims(storage: &ScopedStorage) {
             docs.put(
                 &coll,
                 id,
-                json!({"state": "queued", "run_at": at, "owner": {"pid": 0}}),
+                json!({"state": "queued", "run_at": at, "owner": {"pid": 0, "host": "h"}}),
                 Precondition::None,
             )
             .await,
@@ -349,7 +400,7 @@ async fn claims(storage: &ScopedStorage) {
     assert_eq!(first.doc["state"], "running");
     assert_eq!(
         first.doc["owner"],
-        json!({"pid": 7}),
+        json!({"pid": 7, "host": "h"}),
         "patch merges nested objects"
     );
     assert_eq!(first.doc["run_at"], 10, "untouched fields survive");

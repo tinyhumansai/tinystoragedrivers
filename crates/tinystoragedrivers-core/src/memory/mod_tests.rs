@@ -103,7 +103,6 @@ fn reports_its_driver_and_capabilities() {
     assert_eq!(format!("{storage:?}"), "MemoryStorage { .. }");
     let docs = storage.for_scope(&Scope::local()).unwrap();
     assert!(format!("{:?}", docs.documents()).contains("local"));
-    assert!(system_clock() > 0);
 }
 
 #[test]

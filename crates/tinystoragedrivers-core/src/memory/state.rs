@@ -49,6 +49,10 @@ pub(super) struct DbState {
     pub(super) docs: BTreeMap<ScopedKey, BTreeMap<String, StoredDoc>>,
     pub(super) streams: BTreeMap<ScopedKey, StoredStream>,
     pub(super) blobs: BTreeMap<ScopedKey, (BlobMeta, Vec<u8>)>,
+    /// The last version of every removed document, so a recreated id
+    /// continues its version sequence and a stale compare-and-swap from
+    /// before the removal still fails.
+    pub(super) tombstones: BTreeMap<ScopedKey, BTreeMap<String, Version>>,
 }
 
 impl DbState {
@@ -126,19 +130,26 @@ impl DbState {
         let current = self.get(scope, collection, id, now_ms);
         check(precondition, current.as_ref(), collection, id)?;
         self.check_unique(&spec, scope, id, &doc, now_ms)?;
-        let docs = self
+        let key = (scope.to_owned(), collection.to_owned());
+        // Versions keep rising across expiry and deletion, so a stale CAS on
+        // a re-created document still fails.
+        let last = self
             .docs
-            .entry((scope.to_owned(), collection.to_owned()))
-            .or_default();
-        // Versions keep rising across expiry, so a stale CAS on a re-created
-        // document still fails.
-        let version = match docs.get(id) {
+            .get(&key)
+            .and_then(|docs| docs.get(id))
+            .map(|stored| stored.version)
+            .or_else(|| {
+                self.tombstones
+                    .get(&key)
+                    .and_then(|buried| buried.get(id).copied())
+            });
+        let version = match last {
             None => Version::FIRST,
-            Some(stored) => stored
-                .version
+            Some(last) => last
                 .next()
                 .ok_or_else(|| StorageError::backend("document version space is exhausted"))?,
         };
+        let docs = self.docs.entry(key).or_default();
         docs.insert(id.to_owned(), StoredDoc { version, doc });
         Ok(version)
     }
@@ -155,11 +166,32 @@ impl DbState {
         validate_id(id)?;
         let current = self.get(scope, collection, id, now_ms);
         check(precondition, current.as_ref(), collection, id)?;
-        let removed = self
-            .docs
-            .get_mut(&(scope.to_owned(), collection.to_owned()))
-            .and_then(|docs| docs.remove(id));
-        Ok(removed.is_some() && current.is_some())
+        let removed = self.remove(scope, collection, id);
+        Ok(removed && current.is_some())
+    }
+
+    /// Refuse a declaration whose unique indexes the stored documents already
+    /// violate, in any scope.
+    pub(super) fn check_existing_unique(&self, spec: &CollectionSpec, now_ms: u64) -> Result<()> {
+        for ((scope, collection), _) in self.docs.iter().filter(|((_, c), _)| *c == spec.name) {
+            for (id, stored) in self.live(scope, collection, now_ms) {
+                self.check_unique(spec, scope, id, &stored.doc, now_ms)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a stored document (live or expired), remembering its version.
+    pub(super) fn remove(&mut self, scope: &str, collection: &str, id: &str) -> bool {
+        let key = (scope.to_owned(), collection.to_owned());
+        let Some(stored) = self.docs.get_mut(&key).and_then(|docs| docs.remove(id)) else {
+            return false;
+        };
+        self.tombstones
+            .entry(key)
+            .or_default()
+            .insert(id.to_owned(), stored.version);
+        true
     }
 
     fn check_unique(
@@ -207,13 +239,8 @@ impl DbState {
             .filter(|(id, stored)| filter.matches(id, &stored.doc))
             .map(|(id, _)| id.clone())
             .collect();
-        if let Some(docs) = self
-            .docs
-            .get_mut(&(scope.to_owned(), collection.to_owned()))
-        {
-            for id in &doomed {
-                docs.remove(id);
-            }
+        for id in &doomed {
+            self.remove(scope, collection, id);
         }
         doomed.len() as u64
     }

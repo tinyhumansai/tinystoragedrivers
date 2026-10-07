@@ -406,6 +406,9 @@ impl Query {
                 "query limit must be at least 1",
             ));
         }
+        for sort in &self.sort {
+            Filter::exists(sort.field.clone(), true).validate()?;
+        }
         self.filter.validate()
     }
 

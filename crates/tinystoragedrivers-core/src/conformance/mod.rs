@@ -21,8 +21,9 @@ mod documents;
 mod isolation;
 mod streams;
 
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::backend::{ScopedStorage, StorageBackend};
 use crate::capabilities::Capability;
@@ -34,6 +35,11 @@ use crate::scope::Scope;
 /// The backend must accept [`Scope::local`] and at least one other scope
 /// (`conformance-b`) unless `single_scope` is set, in which case the isolation
 /// checks are skipped (a single-operator SQLite file).
+///
+/// # Panics
+///
+/// On the first check the driver fails, naming it. That is the suite's
+/// purpose: it is called from a driver's tests.
 pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
     let local = backend
         .for_scope(&Scope::local())
@@ -57,12 +63,11 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
 /// blob key segment.
 fn unique(label: &str) -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    // `RandomState` is seeded from the OS per process, so two processes with
+    // the same PID (separate containers) still get different names.
+    let salt = RandomState::new().build_hasher().finish();
     format!(
-        "conf_{label}_{}_{nanos}_{}",
-        std::process::id(),
+        "conf_{label}_{salt:016x}_{}",
         NEXT.fetch_add(1, Ordering::Relaxed)
     )
 }

@@ -108,6 +108,7 @@ impl DocumentStore for MemoryDocuments {
             Some(existing) => existing.merge(spec)?,
             None => spec.clone(),
         };
+        state.check_existing_unique(&merged, self.now())?;
         state.specs.insert(spec.name.clone(), merged);
         Ok(())
     }
@@ -206,6 +207,7 @@ impl DocumentStore for MemoryDocuments {
         let mut draft = DbState {
             specs: state.specs.clone(),
             docs: state.docs.clone(),
+            tombstones: state.tombstones.clone(),
             ..DbState::default()
         };
         let scope = self.scope.as_str();
@@ -230,6 +232,7 @@ impl DocumentStore for MemoryDocuments {
             });
         }
         state.docs = draft.docs;
+        state.tombstones = draft.tombstones;
         Ok(results)
     }
 
@@ -274,9 +277,15 @@ impl DocumentStore for MemoryDocuments {
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         validate_collection(collection)?;
         let mut state = self.db.lock()?;
-        state
+        let key = (self.scope.as_str().to_owned(), collection.to_owned());
+        let ids: Vec<String> = state
             .docs
-            .remove(&(self.scope.as_str().to_owned(), collection.to_owned()));
+            .get(&key)
+            .map(|docs| docs.keys().cloned().collect())
+            .unwrap_or_default();
+        for id in ids {
+            state.remove(self.scope.as_str(), collection, &id);
+        }
         Ok(())
     }
 }
