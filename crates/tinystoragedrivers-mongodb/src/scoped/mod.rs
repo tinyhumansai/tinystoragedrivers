@@ -3,22 +3,80 @@
 //!
 //! [`ScopedCollection`] owns its [`Collection`] privately and takes only the
 //! *inner* filter from callers. [`ScopedCollection::filter`] ANDs the scope
-//! equality onto it, inserts are stamped with the scope, and an aggregation's
-//! first stage is a scoped `$match`. No other module holds a collection
-//! handle for tenant data, so a call site cannot forget the scope.
+//! equality onto it, inserts and replacements are stamped with the scope, and
+//! an aggregation's first stage is a scoped `$match`. No other module holds a
+//! collection handle for tenant data, so a call site cannot forget the scope.
+//!
+//! Two rules keep later steps from undoing that:
+//! - an aggregation may only use single-collection stages ([`STAGES`]), so no
+//!   `$lookup`, `$unionWith`, `$merge` or `$out` can read or write elsewhere;
+//! - an update must be operator-style and must not touch `_scope`
+//!   ([`check_update`]), so a document can never be moved out of its scope.
 //!
 //! GridFS files carry their scope under `metadata`; [`scoped_filter`] is the
 //! same rule over an arbitrary scope field.
 
 use futures_util::TryStreamExt;
 use mongodb::bson::{Bson, Document, doc};
-use mongodb::error::Result;
-use mongodb::options::{AggregateOptions, FindOptions, UpdateModifications};
+use mongodb::error::{Error, Result};
+use mongodb::options::{AggregateOptions, FindOptions};
 use mongodb::results::UpdateResult;
 use mongodb::{ClientSession, Collection};
 use tinystoragedrivers_core::Scope;
 
 use crate::naming::SCOPE;
+
+/// The aggregation stages a scoped pipeline may use: each reads and writes
+/// only the documents flowing through it.
+pub(crate) const STAGES: [&str; 10] = [
+    "$match",
+    "$addFields",
+    "$set",
+    "$project",
+    "$unset",
+    "$sort",
+    "$skip",
+    "$limit",
+    "$group",
+    "$count",
+];
+
+/// Refuse a pipeline stage outside [`STAGES`].
+///
+/// # Errors
+///
+/// A custom MongoDB error (mapped to a backend error) naming the stage kind.
+pub(crate) fn check_stage(stage: &Document) -> Result<()> {
+    match stage.keys().next() {
+        Some(kind) if stage.len() == 1 && STAGES.contains(&kind.as_str()) => Ok(()),
+        _ => Err(Error::custom(
+            "aggregation stage not allowed on scoped data".to_owned(),
+        )),
+    }
+}
+
+/// Refuse an update that is not operator-style or that touches the scope
+/// field, so no update can move a document to another scope or drop it.
+///
+/// # Errors
+///
+/// A custom MongoDB error (mapped to a backend error).
+pub(crate) fn check_update(update: &Document) -> Result<()> {
+    let touches_scope = |path: &str| path == SCOPE || path.starts_with(&format!("{SCOPE}."));
+    for (operator, fields) in update {
+        let (true, Bson::Document(fields)) = (operator.starts_with('$'), fields) else {
+            return Err(Error::custom(
+                "scoped updates must be operator documents".to_owned(),
+            ));
+        };
+        if fields.keys().any(|path| touches_scope(path)) {
+            return Err(Error::custom(
+                "scoped updates must not change the scope".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// `inner`, restricted to documents whose `field` equals `scope`.
 pub(crate) fn scoped_filter(field: &str, scope: &Scope, inner: Document) -> Document {
@@ -40,11 +98,6 @@ pub(crate) struct ScopedCollection {
 impl ScopedCollection {
     pub(crate) fn new(collection: Collection<Document>, scope: Scope) -> Self {
         Self { collection, scope }
-    }
-
-    /// The Mongo collection name.
-    pub(crate) fn name(&self) -> &str {
-        self.collection.name()
     }
 
     /// `inner` restricted to this scope.
@@ -109,6 +162,7 @@ impl ScopedCollection {
         inner: Document,
         stages: Vec<Document>,
     ) -> Result<Vec<Document>> {
+        stages.iter().try_for_each(check_stage)?;
         self.collection
             .aggregate(self.pipeline(inner, stages))
             .with_options(AggregateOptions::builder().allow_disk_use(true).build())
@@ -119,10 +173,6 @@ impl ScopedCollection {
 
     pub(crate) async fn count(&self, inner: Document) -> Result<u64> {
         self.collection.count_documents(self.filter(inner)).await
-    }
-
-    pub(crate) async fn distinct(&self, field: &str, inner: Document) -> Result<Vec<Bson>> {
-        self.collection.distinct(field, self.filter(inner)).await
     }
 
     /// Insert `doc`, stamped with this scope.
@@ -157,15 +207,20 @@ impl ScopedCollection {
         .map(|result| result.matched_count == 1)
     }
 
-    /// Update the first matching document. With `upsert`, the inserted
-    /// document takes the scope from the filter's equality.
+    /// Apply `update` to the first matching document. With `upsert`, the
+    /// inserted document takes its scope from the filter's equality.
+    ///
+    /// # Errors
+    ///
+    /// An update [`check_update`] refuses, or a server error.
     pub(crate) async fn update_one(
         &self,
         inner: Document,
-        update: impl Into<UpdateModifications>,
+        update: Document,
         upsert: bool,
         session: Option<&mut ClientSession>,
     ) -> Result<UpdateResult> {
+        check_update(&update)?;
         let action = self
             .collection
             .update_one(self.filter(inner), update)
@@ -174,6 +229,27 @@ impl ScopedCollection {
             Some(session) => action.session(session).await,
             None => action.await,
         }
+    }
+
+    /// Apply `update` to every matching document and report how many
+    /// changed.
+    ///
+    /// # Errors
+    ///
+    /// An update [`check_update`] refuses, or a server error.
+    pub(crate) async fn update_many(
+        &self,
+        inner: Document,
+        update: Document,
+        session: Option<&mut ClientSession>,
+    ) -> Result<u64> {
+        check_update(&update)?;
+        let action = self.collection.update_many(self.filter(inner), update);
+        match session {
+            Some(session) => action.session(session).await,
+            None => action.await,
+        }
+        .map(|result| result.modified_count)
     }
 
     pub(crate) async fn delete_many(

@@ -10,7 +10,7 @@ use tinystoragedrivers_core::{
 };
 
 use crate::convert::{from_document, to_document};
-use crate::naming::{BODY, KEY, VERSION, document_id};
+use crate::naming::{BODY, DELETED, KEY, VERSION, document_id};
 
 /// One stored document as read back from MongoDB.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +18,8 @@ pub(crate) struct Stored {
     pub(crate) key: String,
     pub(crate) version: Version,
     pub(crate) body: Value,
+    /// A tombstone: the document was removed and only its version remains.
+    pub(crate) deleted: bool,
 }
 
 impl Stored {
@@ -41,6 +43,7 @@ impl Stored {
             key,
             version: Version(version),
             body,
+            deleted: doc.get_bool(DELETED).unwrap_or(false),
         })
     }
 
@@ -69,9 +72,30 @@ pub(crate) fn expired_filter(spec: &CollectionSpec, now_ms: u64) -> Option<Filte
         .map(|field| Filter::lte(field.clone(), now_ms))
 }
 
-/// Whether `stored` has expired.
+/// Whether `stored` is a document a read returns: not a tombstone and not
+/// expired.
 pub(crate) fn is_live(spec: &CollectionSpec, stored: &Stored, now_ms: u64) -> bool {
-    live_filter(spec, now_ms).matches(&stored.key, &stored.body)
+    !stored.deleted && live_filter(spec, now_ms).matches(&stored.key, &stored.body)
+}
+
+/// The query clause excluding tombstones.
+pub(crate) fn not_deleted() -> Document {
+    doc! {DELETED: {"$exists": false}}
+}
+
+/// `query` with tombstones excluded.
+pub(crate) fn visible(query: Document) -> Document {
+    if query.is_empty() {
+        not_deleted()
+    } else {
+        doc! {"$and": [not_deleted(), query]}
+    }
+}
+
+/// The update turning a document into its tombstone: the version stays, the
+/// body empties (so no unique or text index holds it any more).
+pub(crate) fn bury() -> Document {
+    doc! {"$set": {BODY: {}, DELETED: true}}
 }
 
 /// Enforce a precondition against the live document, if any.

@@ -122,3 +122,10 @@ fn adapters_map_like_their_functions() {
     let mapped = failed_io("x")(std::io::Error::other("disk"));
     assert_eq!(mapped.kind(), ErrorKind::Unavailable);
 }
+
+#[test]
+fn only_gridfs_failures_mean_a_vanished_file() {
+    assert!(!is_gridfs(&command_error(2)));
+    assert!(!io_is_gridfs(&std::io::Error::other("disk")));
+    assert!(!io_is_gridfs(&std::io::Error::other(command_error(2))));
+}

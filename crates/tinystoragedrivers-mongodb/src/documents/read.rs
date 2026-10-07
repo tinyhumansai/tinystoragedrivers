@@ -16,7 +16,7 @@ use tinystoragedrivers_core::{
 };
 
 use super::MongoDocuments;
-use super::stored::{Stored, live_filter};
+use super::stored::{Stored, live_filter, visible};
 use crate::errors;
 use crate::naming::{BODY, KEY};
 use crate::scoped::ScopedCollection;
@@ -37,7 +37,8 @@ impl MongoDocuments {
     /// `filter` AND the expiry rule, and its translation.
     fn effective(&self, spec: &CollectionSpec, filter: &Filter) -> (Filter, Translated) {
         let effective = filter.clone().and(live_filter(spec, self.shared.now()));
-        let translated = translate::filter(&effective);
+        let mut translated = translate::filter(&effective);
+        translated.query = visible(translated.query);
         (effective, translated)
     }
 
@@ -55,7 +56,7 @@ impl MongoDocuments {
             .map_err(errors::failed("read documents"))?;
         Ok(decode_all(&docs)?
             .into_iter()
-            .filter(|stored| effective.matches(&stored.key, &stored.body))
+            .filter(|stored| !stored.deleted && effective.matches(&stored.key, &stored.body))
             .collect())
     }
 
@@ -164,7 +165,8 @@ impl MongoDocuments {
         filter: &Filter,
     ) -> Result<Vec<(String, Version)>> {
         let handle = self.collection(collection);
-        let translated = translate::filter(filter);
+        let mut translated = translate::filter(filter);
+        translated.query = visible(translated.query);
         Ok(self
             .candidates(&handle, filter, &translated)
             .await?
@@ -192,10 +194,15 @@ impl MongoDocuments {
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
         let spec = self.shared.spec(collection).await?;
-        if spec.search.is_none() {
+        let Some(search) = &spec.search else {
             return Err(StorageError::invalid_input(
                 "this collection declares no search fields",
             ));
+        };
+        if search.fields.is_empty() {
+            // Declared but empty: nothing is searchable, as on the memory
+            // driver, and no text index exists to ask.
+            return Ok(Vec::new());
         }
         // Tokens only: the reference tokenizer's alphanumeric runs, so no
         // `-negation` or `"phrase"` operator reaches `$text`.

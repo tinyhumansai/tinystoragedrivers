@@ -37,3 +37,7 @@ mod config;
 
 pub use config::{StorageConfig, open};
 pub use tinystoragedrivers_core::*;
+/// The MongoDB backend, for hosts that construct it directly (an injected
+/// clock, transactions turned off, expiry sweeps).
+#[cfg(feature = "mongodb")]
+pub use tinystoragedrivers_mongodb::MongoStorage;

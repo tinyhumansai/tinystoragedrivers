@@ -6,7 +6,7 @@ use tinystoragedrivers_core::ErrorKind;
 
 #[test]
 fn new_segments_cover_their_batch() {
-    let segment = new_segment("log", 4, &[json!(1), json!({"a": 2})]).unwrap();
+    let segment = new_segment("log", 0, 4, &[json!(1), json!({"a": 2})]).unwrap();
     assert_eq!(segment.get_str("s").unwrap(), "log");
     assert_eq!(segment.get_i64("o").unwrap(), 4);
     assert_eq!(segment.get_i64("n").unwrap(), 2);
@@ -17,19 +17,19 @@ fn new_segments_cover_their_batch() {
     assert_eq!(decoded.id, Bson::Null);
 
     assert_eq!(
-        new_segment("log", u64::MAX, &[json!(1)])
+        new_segment("log", 0, u64::MAX, &[json!(1)])
             .unwrap_err()
             .kind(),
         ErrorKind::Backend
     );
     assert_eq!(
-        new_segment("log", u64::MAX - 1, &[json!(1)])
+        new_segment("log", 0, u64::MAX - 1, &[json!(1)])
             .unwrap_err()
             .kind(),
         ErrorKind::Backend
     );
     assert_eq!(
-        new_segment("log", 0, &[json!(u64::MAX)])
+        new_segment("log", 0, 0, &[json!(u64::MAX)])
             .unwrap_err()
             .kind(),
         ErrorKind::Serialization

@@ -5,9 +5,11 @@
 //! lookup filters on `metadata._scope` through [`scoped_filter`].
 //!
 //! A replacement uploads the new file first and then deletes every older file
-//! with the same key (by `_id`, which orders uploads). Reads pick the newest,
-//! so a reader never sees a missing blob mid-replacement, and two concurrent
-//! writers converge on the one with the greater id.
+//! with the same key (by `_id`, which orders uploads), and two concurrent
+//! writers converge on the one with the greater id. A read picks the newest
+//! file; if a replacement deletes that file before or while it is read, the
+//! read resolves the key again and reads the replacement, so a reader never
+//! sees a blob vanish mid-replacement.
 //!
 //! Ranged reads fetch only the chunks the range touches, straight from the
 //! bucket's `chunks` collection, by the file id resolved under the scope.
@@ -129,11 +131,77 @@ impl MongoBlobs {
             match bucket.delete(id).await {
                 Ok(()) => {}
                 // A concurrent delete got there first.
-                Err(error) if matches!(*error.kind, mongodb::error::ErrorKind::GridFs(_)) => {}
+                Err(error) if errors::is_gridfs(&error) => {}
                 Err(error) => return Err(errors::map(error, "delete a blob")),
             }
         }
         Ok(())
+    }
+}
+
+/// How many times a read re-resolves a blob whose file a concurrent
+/// replacement removed mid-read.
+const READ_ATTEMPTS: usize = 8;
+
+fn replaced_too_often() -> StorageError {
+    StorageError::unavailable("blob kept being replaced while it was read; retry")
+}
+
+impl MongoBlobs {
+    /// The whole file, or `None` when it was deleted (by a concurrent
+    /// replacement) before or while it was read.
+    async fn download(
+        bucket: &GridFsBucket,
+        file: &FilesCollectionDocument,
+    ) -> Result<Option<Vec<u8>>> {
+        let mut download = match bucket.open_download_stream(file.id.clone()).await {
+            Ok(download) => download,
+            Err(error) if errors::is_gridfs(&error) => return Ok(None),
+            Err(error) => return Err(errors::map(error, "read a blob")),
+        };
+        let mut bytes = Vec::new();
+        match download.read_to_end(&mut bytes).await {
+            Ok(_) => Ok(Some(bytes)),
+            Err(error) if errors::io_is_gridfs(&error) => Ok(None),
+            Err(error) => Err(errors::map_io(error, "read a blob")),
+        }
+    }
+
+    /// The bytes of `range` (already clamped and non-empty), or `None` when
+    /// the file's chunks were deleted before they were read.
+    async fn read_chunks(
+        &self,
+        file: &FilesCollectionDocument,
+        range: &Range<usize>,
+    ) -> Result<Option<Vec<u8>>> {
+        let chunk_size = usize::try_from(file.chunk_size_bytes).unwrap_or(usize::MAX);
+        let (first, last, skip) = chunk_span(range, chunk_size);
+        let chunks = self
+            .shared
+            .raw(&format!("{BLOBS}.chunks"))
+            .find(doc! {
+                "files_id": file.id.clone(),
+                "n": {"$gte": i64::try_from(first).unwrap_or(i64::MAX), "$lte": i64::try_from(last).unwrap_or(i64::MAX)},
+            })
+            .with_options(FindOptions::builder().sort(doc! {"n": 1}).build())
+            .await
+            .map_err(errors::failed("read a blob range"))?
+            .try_collect::<Vec<Document>>()
+            .await
+            .map_err(errors::failed("read a blob range"))?;
+        let mut bytes = Vec::new();
+        for chunk in &chunks {
+            let data = chunk
+                .get_binary_generic("data")
+                .map_err(|_| StorageError::serialization("malformed blob chunk"))?;
+            bytes.extend_from_slice(data);
+        }
+        if bytes.len() < skip + range.len() {
+            return Ok(None);
+        }
+        Ok(Some(
+            bytes.into_iter().skip(skip).take(range.len()).collect(),
+        ))
     }
 }
 
@@ -173,60 +241,39 @@ impl BlobStore for MongoBlobs {
     async fn get(&self, key: &str) -> Result<Option<Blob>> {
         validate_blob_key(key)?;
         let bucket = self.bucket().await?;
-        let Some(file) = self.newest(&bucket, key).await? else {
-            return Ok(None);
-        };
-        let mut download = bucket
-            .open_download_stream(file.id.clone())
-            .await
-            .map_err(errors::failed("read a blob"))?;
-        let mut bytes = Vec::new();
-        download
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(errors::failed_io("read a blob"))?;
-        Ok(Some(Blob {
-            meta: blob_meta(&file),
-            bytes,
-        }))
+        for _ in 0..READ_ATTEMPTS {
+            let Some(file) = self.newest(&bucket, key).await? else {
+                return Ok(None);
+            };
+            if let Some(bytes) = Self::download(&bucket, &file).await? {
+                return Ok(Some(Blob {
+                    meta: blob_meta(&file),
+                    bytes,
+                }));
+            }
+        }
+        Err(replaced_too_often())
     }
 
     async fn get_range(&self, key: &str, range: Range<u64>) -> Result<Option<Vec<u8>>> {
         validate_blob_key(key)?;
         let bucket = self.bucket().await?;
-        let Some(file) = self.newest(&bucket, key).await? else {
-            return Ok(None);
-        };
-        let len = usize::try_from(file.length)
-            .map_err(|_| StorageError::backend("blob is larger than this platform can address"))?;
-        let range = clamp_range(&range, len)?;
-        if range.is_empty() {
-            return Ok(Some(Vec::new()));
+        for _ in 0..READ_ATTEMPTS {
+            let Some(file) = self.newest(&bucket, key).await? else {
+                return Ok(None);
+            };
+            let len = usize::try_from(file.length).map_err(|_| {
+                StorageError::backend("blob is larger than this platform can address")
+            })?;
+            let range = clamp_range(&range, len)?;
+            if range.is_empty() {
+                return Ok(Some(Vec::new()));
+            }
+            if let Some(bytes) = self.read_chunks(&file, &range).await? {
+                return Ok(Some(bytes));
+            }
         }
-        let chunk_size = usize::try_from(file.chunk_size_bytes).unwrap_or(usize::MAX);
-        let (first, last, skip) = chunk_span(&range, chunk_size);
-        let chunks = self
-            .shared
-            .raw(&format!("{BLOBS}.chunks"))
-            .find(doc! {
-                "files_id": file.id.clone(),
-                "n": {"$gte": i64::try_from(first).unwrap_or(i64::MAX), "$lte": i64::try_from(last).unwrap_or(i64::MAX)},
-            })
-            .with_options(FindOptions::builder().sort(doc! {"n": 1}).build())
-            .await
-            .map_err(errors::failed("read a blob range"))?
-            .try_collect::<Vec<Document>>()
-            .await
-            .map_err(errors::failed("read a blob range"))?;
-        let mut bytes = Vec::new();
-        for chunk in &chunks {
-            let data = chunk
-                .get_binary_generic("data")
-                .map_err(|_| StorageError::serialization("malformed blob chunk"))?;
-            bytes.extend_from_slice(data);
-        }
-        let wanted = range.len();
-        Ok(Some(bytes.into_iter().skip(skip).take(wanted).collect()))
+        Err(replaced_too_often())
     }
 
     async fn head(&self, key: &str) -> Result<Option<BlobMeta>> {

@@ -21,15 +21,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use futures_util::TryStreamExt;
 use mongodb::IndexModel;
-use mongodb::bson::{Document, doc};
+use mongodb::bson::{Bson, Document, doc};
 use mongodb::options::IndexOptions;
 use tinystoragedrivers_core::{CollectionSpec, Result, SearchSpec, StorageError};
 
 use super::Shared;
+use crate::documents::stored::{Stored, bury, expired_filter, not_deleted, visible};
 use crate::errors;
-use crate::naming::{KEY, META, SCOPE, SCOPE_KEY_INDEX, TEXT_INDEX, index_name};
-use crate::translate::body_field;
+use crate::naming::{KEY, META, SCOPE, SCOPE_KEY_INDEX, TEXT_INDEX, VERSION, index_name};
+use crate::translate::{self, body_field};
 
 /// How long a declaration read from `_tsd_meta` is trusted.
 pub(crate) const REFRESH: Duration = Duration::from_secs(5);
@@ -113,21 +115,34 @@ pub(crate) fn index_models(spec: &CollectionSpec) -> Result<Vec<IndexModel>> {
 }
 
 /// The text index over a declaration's search fields, or `None` when it
-/// declares none MongoDB can index.
-pub(crate) fn text_model(search: &SearchSpec) -> Option<IndexModel> {
-    let mut keys = doc! {SCOPE: 1};
-    for field in search.fields.iter().filter(|field| indexable(field)) {
-        keys.insert(body_field(field), "text");
+/// declares no fields (nothing is searchable, and `search` answers empty).
+///
+/// # Errors
+///
+/// [`ErrorKind::InvalidInput`](tinystoragedrivers_core::ErrorKind::InvalidInput)
+/// for a field MongoDB cannot index, rather than silently leaving it
+/// unsearchable.
+pub(crate) fn text_model(search: &SearchSpec) -> Result<Option<IndexModel>> {
+    if let Some(field) = search.fields.iter().find(|field| !indexable(field)) {
+        return Err(StorageError::invalid_input(format!(
+            "search field `{field}` has a segment starting with `$`, which MongoDB cannot index"
+        )));
     }
-    if keys.len() == 1 {
-        return None;
+    if search.fields.is_empty() {
+        return Ok(None);
+    }
+    let mut keys = doc! {SCOPE: 1};
+    for field in &search.fields {
+        keys.insert(body_field(field), "text");
     }
     let mut options = IndexOptions::builder().name(TEXT_INDEX.to_owned()).build();
     // No stemming and no stop words, closest to the reference tokenizer; the
     // override names a field no stored document has.
     options.default_language = Some("none".to_owned());
     options.language_override = Some("_tsd_language".to_owned());
-    Some(IndexModel::builder().keys(keys).options(options).build())
+    Ok(Some(
+        IndexModel::builder().keys(keys).options(options).build(),
+    ))
 }
 
 /// The `(_scope, _key)` index every document collection carries.
@@ -159,6 +174,46 @@ pub(crate) fn decode_meta(entry: &Document) -> Result<(CollectionSpec, i64)> {
 const ENSURE_ATTEMPTS: usize = 16;
 
 impl Shared {
+    /// Bury every expired document of `spec`'s collection, in every scope,
+    /// before a unique index is built over it.
+    ///
+    /// An expired document reads as absent, so the memory driver ignores it
+    /// when checking a new unique index; MongoDB's index build would count
+    /// it. This is the one deliberately collection-wide write: it belongs to
+    /// a declaration, which the spec makes collection-wide, and it only
+    /// buries documents their own scope can no longer see (keeping their
+    /// versions).
+    async fn retire_expired(&self, spec: &CollectionSpec) -> Result<()> {
+        let Some(expired) = expired_filter(spec, self.now()) else {
+            return Ok(());
+        };
+        let collection = self.raw(&spec.name);
+        let rows: Vec<Document> = collection
+            .find(visible(translate::filter(&expired).query))
+            .await
+            .map_err(errors::failed("find expired documents"))?
+            .try_collect()
+            .await
+            .map_err(errors::failed("find expired documents"))?;
+        let mut selectors = Vec::new();
+        for row in &rows {
+            let stored = Stored::decode(row)?;
+            if !stored.deleted && expired.matches(&stored.key, &stored.body) {
+                selectors.push(doc! {
+                    "_id": row.get("_id").cloned().unwrap_or(Bson::Null),
+                    VERSION: row.get(VERSION).cloned().unwrap_or(Bson::Null),
+                });
+            }
+        }
+        for chunk in selectors.chunks(256) {
+            collection
+                .update_many(doc! {"$and": [not_deleted(), {"$or": chunk}]}, bury())
+                .await
+                .map_err(errors::failed("bury expired documents"))?;
+        }
+        Ok(())
+    }
+
     /// The declaration of `collection`, or an empty one.
     ///
     /// # Errors
@@ -265,19 +320,32 @@ impl Shared {
         let collection = self.raw(&merged.name);
         let mut models = vec![scope_key_model()];
         models.extend(index_models(merged)?);
+        // Validate the text index before building anything.
+        let text = merged
+            .search
+            .as_ref()
+            .map(text_model)
+            .transpose()?
+            .flatten();
+        let adds_unique = merged
+            .indexes
+            .iter()
+            .any(|index| index.unique && previous.is_none_or(|have| !have.indexes.contains(index)));
+        if adds_unique {
+            self.retire_expired(merged).await?;
+        }
         collection
             .create_indexes(models)
             .await
             .map_err(errors::failed("build the declared indexes"))?;
         self.specs
             .mark_prepared(&format!("{}{}", self.prefix, merged.name));
-        let Some(search) = &merged.search else {
+        // Search fields only accumulate (`CollectionSpec::merge`), so a
+        // declaration never goes from searchable to not searchable.
+        let Some(model) = text else {
             return Ok(());
         };
-        let Some(model) = text_model(search) else {
-            return Ok(());
-        };
-        if previous.and_then(|have| have.search.as_ref()) != Some(search) {
+        if previous.and_then(|have| have.search.as_ref()) != merged.search.as_ref() {
             // A collection holds one text index; its fields change by
             // rebuilding it. Dropping a missing index is not an error here.
             let _ = collection.drop_index(TEXT_INDEX).await;

@@ -17,7 +17,7 @@
 //! replacing a scalar) behave exactly as on the memory driver.
 
 mod read;
-mod stored;
+pub(crate) mod stored;
 mod write;
 
 use std::sync::Arc;
@@ -42,6 +42,31 @@ const CLAIM_ATTEMPTS: usize = 64;
 /// How many times a batch retries a transaction the server aborted as
 /// transient.
 const TRANSACTION_ATTEMPTS: usize = 8;
+
+/// What a failed commit means for the batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitFailure {
+    /// The server aborted the transaction: running the batch again is safe.
+    Aborted,
+    /// The commit may have applied. Replaying could apply the batch twice,
+    /// so the caller gets a non-retryable error and must read first.
+    Unknown,
+    /// Any other failure, which did not commit.
+    Failed,
+}
+
+/// Classify a commit failure by its labels. An outcome the driver could not
+/// learn (even after retrying the commit itself) wins over a transient label,
+/// because only an abort guarantees nothing was applied.
+pub(crate) fn commit_failure(error: &mongodb::error::Error) -> CommitFailure {
+    if errors::is_unknown_commit(error) {
+        CommitFailure::Unknown
+    } else if errors::is_transient(error) {
+        CommitFailure::Aborted
+    } else {
+        CommitFailure::Failed
+    }
+}
 
 /// MongoDB documents bound to one scope.
 pub(crate) struct MongoDocuments {
@@ -269,10 +294,18 @@ impl DocumentStore for MongoDocuments {
             };
             match Self::commit(&mut session).await {
                 Ok(()) => return Ok(results),
-                Err(error) if errors::is_transient(&error) => {
-                    last = errors::map(error, "commit a transaction");
-                }
-                Err(error) => return Err(errors::map(error, "commit a transaction")),
+                Err(error) => match commit_failure(&error) {
+                    CommitFailure::Aborted => last = errors::map(error, "commit a transaction"),
+                    CommitFailure::Unknown => {
+                        return Err(StorageError::backend(
+                            "the transaction may or may not have committed; read before retrying",
+                        )
+                        .with_source(error));
+                    }
+                    CommitFailure::Failed => {
+                        return Err(errors::map(error, "commit a transaction"));
+                    }
+                },
             }
         }
         Err(last)

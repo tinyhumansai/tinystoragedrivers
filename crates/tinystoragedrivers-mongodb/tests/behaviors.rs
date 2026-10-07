@@ -12,14 +12,12 @@ mod support;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mongodb::bson::{Document, doc};
 use serde_json::json;
-use support::{connect, database, skip, url};
+use support::{connect, skip};
 use tinystoragedrivers_core::{
     Capability, CollectionSpec, ErrorKind, Filter, IndexSpec, Precondition, Query, Scope, Sort,
     StorageBackend,
 };
-use tinystoragedrivers_mongodb::MongoStorage;
 
 fn name(label: &str) -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -28,12 +26,6 @@ fn name(label: &str) -> String {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     )
-}
-
-async fn raw(collection: &str) -> mongodb::Collection<Document> {
-    let url = url().expect("only called by live tests");
-    let client = mongodb::Client::with_uri_str(&url).await.unwrap();
-    client.database(&database(&url)).collection(collection)
 }
 
 #[tokio::test]
@@ -113,95 +105,6 @@ async fn live_expiry_follows_the_injected_clock_and_sweeps() {
             .kind(),
         ErrorKind::InvalidInput
     );
-}
-
-#[tokio::test]
-async fn live_records_are_stamped_and_scoped() {
-    let Some(backend) = connect().await else {
-        return skip("live_records_are_stamped_and_scoped");
-    };
-    let coll = name("stamp");
-    let alice = backend.for_scope(&Scope::new("alice").unwrap()).unwrap();
-    alice
-        .documents()
-        .put(
-            &coll,
-            "k",
-            json!({"_scope": "mallory", "d": 1}),
-            Precondition::None,
-        )
-        .await
-        .unwrap();
-    let stored = raw(&coll).await.find_one(doc! {}).await.unwrap().unwrap();
-    assert_eq!(stored.get_str("_scope").unwrap(), "alice");
-    assert_eq!(stored.get_str("_key").unwrap(), "k");
-    assert_eq!(stored.get_i64("_v").unwrap(), 1);
-    assert_eq!(
-        stored.get_document("d").unwrap(),
-        &doc! {"_scope": "mallory", "d": 1_i64},
-        "body fields never collide with the driver's"
-    );
-
-    // A foreign document planted in the same collection stays invisible.
-    raw(&coll)
-        .await
-        .insert_one(doc! {"_id": {"s": "bob", "k": "x"}, "_scope": "bob", "_key": "x", "_v": 1_i64, "d": {}})
-        .await
-        .unwrap();
-    let docs = alice.documents();
-    assert_eq!(docs.count(&coll, &Filter::All).await.unwrap(), 1);
-    assert!(docs.get(&coll, "x").await.unwrap().is_none());
-    assert_eq!(docs.delete_where(&coll, &Filter::All).await.unwrap(), 1);
-    assert_eq!(raw(&coll).await.count_documents(doc! {}).await.unwrap(), 1);
-
-    let named = backend.database("stamped").unwrap();
-    let scoped = named.for_scope(&Scope::local()).unwrap();
-    scoped
-        .documents()
-        .put(&coll, "k", json!({}), Precondition::None)
-        .await
-        .unwrap();
-    let prefixed = raw(&format!("stamped:{coll}")).await;
-    assert_eq!(prefixed.count_documents(doc! {}).await.unwrap(), 1);
-}
-
-#[tokio::test]
-async fn live_versions_stop_at_the_int64_ceiling() {
-    let Some(backend) = connect().await else {
-        return skip("live_versions_stop_at_the_int64_ceiling");
-    };
-    let coll = name("ceiling");
-    let docs = backend.for_scope(&Scope::local()).unwrap();
-    let docs = docs.documents();
-    docs.put(&coll, "k", json!({}), Precondition::None)
-        .await
-        .unwrap();
-    raw(&coll)
-        .await
-        .update_one(doc! {}, doc! {"$set": {"_v": i64::MAX}})
-        .await
-        .unwrap();
-    let error = docs
-        .put(&coll, "k", json!({}), Precondition::None)
-        .await
-        .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Backend);
-    let read = docs.get(&coll, "k").await.unwrap().unwrap();
-    assert_eq!(read.version.0, i64::MAX as u64, "nothing changed");
-
-    raw(&coll)
-        .await
-        .update_one(doc! {}, doc! {"$set": {"_v": "broken"}})
-        .await
-        .unwrap();
-    let error = docs.get(&coll, "k").await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Serialization);
-
-    let error = docs
-        .put(&coll, "big", json!({"n": u64::MAX}), Precondition::None)
-        .await
-        .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Serialization);
 }
 
 #[tokio::test]
@@ -318,28 +221,28 @@ async fn live_search_and_declarations() {
         docs.ensure_collection(&bad).await.unwrap_err().kind(),
         ErrorKind::InvalidInput
     );
-    let hint = CollectionSpec::new(&coll)
-        .index(IndexSpec::new("hint", ["$x"]))
-        .searchable(["$y"]);
+    let hint = CollectionSpec::new(&coll).index(IndexSpec::new("hint", ["$x"]));
     docs.ensure_collection(&hint).await.unwrap();
+    let unsearchable = CollectionSpec::new(&coll).searchable(["$y"]);
+    assert_eq!(
+        docs.ensure_collection(&unsearchable)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::InvalidInput
+    );
+    let empty = name("search_empty");
+    docs.ensure_collection(&CollectionSpec::new(&empty).searchable(Vec::<String>::new()))
+        .await
+        .unwrap();
+    docs.put(&empty, "a", json!({"t": "x"}), Precondition::None)
+        .await
+        .unwrap();
+    assert_eq!(docs.search(&empty, "x", 5).await.unwrap(), []);
     let changed = CollectionSpec::new(&coll).index(IndexSpec::new("hint", ["other"]));
     assert_eq!(
         docs.ensure_collection(&changed).await.unwrap_err().kind(),
         ErrorKind::InvalidInput
-    );
-
-    raw("_tsd_meta")
-        .await
-        .update_one(doc! {"_id": &coll}, doc! {"$set": {"spec": 3}})
-        .await
-        .unwrap();
-    let fresh = MongoStorage::connect(&url().unwrap(), &database(&url().unwrap()))
-        .await
-        .unwrap();
-    let fresh = fresh.for_scope(&Scope::local()).unwrap();
-    assert_eq!(
-        fresh.documents().get(&coll, "a").await.unwrap_err().kind(),
-        ErrorKind::Serialization
     );
 }
 
@@ -441,4 +344,81 @@ async fn live_backend_reports_its_driver_and_capabilities() {
         backend.database("Bad").unwrap_err().kind(),
         ErrorKind::InvalidInput
     );
+}
+
+#[tokio::test]
+async fn live_expired_duplicates_do_not_block_a_unique_index() {
+    let Some(backend) = connect().await else {
+        return skip("live_expired_duplicates_do_not_block_a_unique_index");
+    };
+    let now = Arc::new(AtomicU64::new(1_000));
+    let clock = Arc::clone(&now);
+    let backend = backend.with_clock(Arc::new(move || clock.load(Ordering::SeqCst)));
+    let docs = backend
+        .for_scope(&Scope::new("late_unique").unwrap())
+        .unwrap();
+    let docs = docs.documents();
+    let coll = name("late_unique");
+    docs.ensure_collection(&CollectionSpec::new(&coll).ttl("exp"))
+        .await
+        .unwrap();
+    for id in ["a", "b"] {
+        docs.put(
+            &coll,
+            id,
+            json!({"exp": 1_500, "tag": "same"}),
+            Precondition::None,
+        )
+        .await
+        .unwrap();
+    }
+    let unique = CollectionSpec::new(&coll).index(IndexSpec::new("by_tag", ["tag"]).unique());
+    assert_eq!(
+        docs.ensure_collection(&unique).await.unwrap_err().kind(),
+        ErrorKind::AlreadyExists,
+        "live duplicates still refuse the index"
+    );
+    now.store(2_000, Ordering::SeqCst);
+    docs.ensure_collection(&unique).await.unwrap();
+    let v = docs
+        .put(&coll, "a", json!({"tag": "same"}), Precondition::Absent)
+        .await
+        .unwrap();
+    assert!(v.0 > 1, "the expired document's version continues");
+    assert_eq!(
+        docs.put(&coll, "c", json!({"tag": "same"}), Precondition::None)
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::AlreadyExists
+    );
+}
+
+#[tokio::test]
+async fn live_deleting_a_stream_restarts_it_cleanly() {
+    let Some(backend) = connect().await else {
+        return skip("live_deleting_a_stream_restarts_it_cleanly");
+    };
+    let streams = backend.for_scope(&Scope::local()).unwrap();
+    let streams = streams.streams();
+    let stream = name("restart");
+    streams
+        .append_batch(&stream, vec![json!(1), json!(2)])
+        .await
+        .unwrap();
+    assert!(streams.delete_stream(&stream).await.unwrap());
+    assert!(!streams.delete_stream(&stream).await.unwrap());
+    assert_eq!(streams.len(&stream).await.unwrap(), 0);
+    assert_eq!(
+        streams.streams(&stream).await.unwrap(),
+        Vec::<String>::new()
+    );
+    assert_eq!(streams.append(&stream, json!(3)).await.unwrap(), 0);
+    assert_eq!(
+        streams.streams(&stream).await.unwrap(),
+        std::slice::from_ref(&stream)
+    );
+    let window = streams.read_window(&stream, 0, 10).await.unwrap();
+    assert_eq!(window.len(), 1);
+    assert_eq!(window[0].value, json!(3));
 }

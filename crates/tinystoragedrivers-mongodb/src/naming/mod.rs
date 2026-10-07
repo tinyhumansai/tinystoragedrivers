@@ -9,7 +9,8 @@
 //!   [`RESERVED_PREFIX`](tinystoragedrivers_core::RESERVED_PREFIX), which port
 //!   names cannot start with.
 //! - **Stored documents.** `{_id: {s, k}, _scope, _key, _v, d}`: the body lives
-//!   under [`BODY`] so its field names never collide with the driver's.
+//!   under [`BODY`] so its field names never collide with the driver's. A
+//!   removed document stays as a tombstone (`_del: true`, empty body).
 //! - **Cursors and index names** carry an FNV-1a hash, which, unlike
 //!   `DefaultHasher`, is stable across processes and Rust releases. A cursor
 //!   issued by one server process is valid on another.
@@ -27,12 +28,16 @@ pub(crate) const KEY: &str = "_key";
 pub(crate) const VERSION: &str = "_v";
 /// The field holding the document body.
 pub(crate) const BODY: &str = "d";
+/// Present (and `true`) on a removed document's tombstone: the row keeps its
+/// `_v` so a recreated id continues its version sequence, and its body is
+/// emptied so no index or text search sees it.
+pub(crate) const DELETED: &str = "_del";
 
 /// Driver metadata: one document per declared collection.
 pub(crate) const META: &str = "_tsd_meta";
-/// The last version of every removed document, so a recreated id continues
-/// its version sequence.
-pub(crate) const TOMBSTONES: &str = "_tsd_tombstones";
+/// One header per stream holding its generation, which `delete_stream`
+/// advances.
+pub(crate) const STREAM_HEADS: &str = "_tsd_stream_heads";
 /// Stream segments.
 pub(crate) const STREAMS: &str = "_tsd_streams";
 /// The GridFS bucket holding blobs.
@@ -48,11 +53,6 @@ pub(crate) const STREAM_SEGMENT_INDEX: &str = "_tsd_stream_segment";
 pub(crate) const STREAM_END_INDEX: &str = "_tsd_stream_end";
 /// The `(metadata._scope, filename)` index over GridFS files.
 pub(crate) const BLOB_KEY_INDEX: &str = "_tsd_blob_key";
-
-/// The `_id` of a tombstone: the port collection, scope and key.
-pub(crate) fn tombstone_id(collection: &str, scope: &Scope, key: &str) -> Document {
-    doc! {"c": collection, "s": scope.as_str(), "k": key}
-}
 
 /// The Mongo collection prefix of a named database.
 pub(crate) fn database_prefix(name: &str) -> String {

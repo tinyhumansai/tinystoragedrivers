@@ -16,6 +16,16 @@
 //! falls inside, and never deletes the last segment (it is trimmed to empty
 //! instead), so `len` survives. Each step is idempotent and monotonic, so an
 //! interrupted truncation is finished by the next one.
+//!
+//! **Deletion** is coordinated with appends through a *generation*. Each
+//! stream has a header in `<prefix>_tsd_stream_heads` holding its generation
+//! `g` (0 when absent), every segment records the generation it was appended
+//! in, and every read considers only the current generation's segments.
+//! `delete_stream` advances the generation first and then removes the older
+//! segments. An append that read the old generation before the delete lands
+//! in the old generation, which no reader looks at: it is ordered before the
+//! delete, never interleaved with the new stream, so the new stream still
+//! starts at offset 0 with no gap. The next delete removes such leftovers.
 
 use std::sync::Arc;
 
@@ -32,7 +42,9 @@ use tinystoragedrivers_core::{
 use crate::backend::Shared;
 use crate::convert::{from_bson, to_bson};
 use crate::errors;
-use crate::naming::{SCOPE, STREAM_END_INDEX, STREAM_SEGMENT_INDEX, STREAMS, prefix_regex};
+use crate::naming::{
+    SCOPE, STREAM_END_INDEX, STREAM_HEADS, STREAM_SEGMENT_INDEX, STREAMS, prefix_regex,
+};
 use crate::scoped::ScopedCollection;
 
 /// How many times an append retries after another appender took its offset.
@@ -81,7 +93,11 @@ impl Segment {
                 .map_err(|_| StorageError::serialization("malformed stream segment"))?
                 .clone(),
         };
-        if segment.start + segment.trimmed + segment.values.len() as u64 != segment.end {
+        let covered = segment
+            .start
+            .checked_add(segment.trimmed)
+            .and_then(|first| first.checked_add(segment.values.len() as u64));
+        if covered != Some(segment.end) {
             return Err(StorageError::serialization("malformed stream segment"));
         }
         Ok(segment)
@@ -98,12 +114,17 @@ impl Segment {
     }
 }
 
-/// The segment document for `values` appended at `start`.
+/// The segment document for `values` appended at `start` in `generation`.
 ///
 /// # Errors
 ///
 /// A value that does not convert to BSON, or an exhausted offset space.
-pub(crate) fn new_segment(stream: &str, start: u64, values: &[Value]) -> Result<Document> {
+pub(crate) fn new_segment(
+    stream: &str,
+    generation: i64,
+    start: u64,
+    values: &[Value],
+) -> Result<Document> {
     let values: Vec<Bson> = values.iter().map(to_bson).collect::<Result<_>>()?;
     let count = values.len() as u64;
     let end = start
@@ -111,6 +132,7 @@ pub(crate) fn new_segment(stream: &str, start: u64, values: &[Value]) -> Result<
         .ok_or_else(|| StorageError::backend("stream offset space is exhausted"))?;
     Ok(doc! {
         "s": stream,
+        "g": generation,
         "o": stored_offset(start)?,
         "n": stored_offset(count)?,
         "e": stored_offset(end)?,
@@ -127,14 +149,19 @@ fn segment_models() -> Vec<IndexModel> {
     };
     vec![
         IndexModel::builder()
-            .keys(doc! {SCOPE: 1, "s": 1, "o": 1})
+            .keys(doc! {SCOPE: 1, "s": 1, "g": 1, "o": 1})
             .options(named(STREAM_SEGMENT_INDEX, true))
             .build(),
         IndexModel::builder()
-            .keys(doc! {SCOPE: 1, "s": 1, "e": 1})
+            .keys(doc! {SCOPE: 1, "s": 1, "g": 1, "e": 1})
             .options(named(STREAM_END_INDEX, false))
             .build(),
     ]
+}
+
+/// The `_id` of a stream header: unique per scope and stream.
+pub(crate) fn head_id(scope: &Scope, stream: &str) -> Document {
+    doc! {"s": scope.as_str(), "n": stream}
 }
 
 /// MongoDB streams bound to one scope.
@@ -154,16 +181,32 @@ impl MongoStreams {
         Ok(self.shared.scoped(STREAMS, &self.scope))
     }
 
-    /// The segment of `stream` first in `order` (`1` first, `-1` last).
+    fn heads(&self) -> ScopedCollection {
+        self.shared.scoped(STREAM_HEADS, &self.scope)
+    }
+
+    /// The current generation of `stream`.
+    async fn generation(&self, stream: &str) -> Result<i64> {
+        let head = self
+            .heads()
+            .find_one(doc! {"_id": head_id(&self.scope, stream)}, None)
+            .await
+            .map_err(errors::failed("read a stream header"))?;
+        Ok(head.map_or(0, |head| head.get_i64("g").unwrap_or(0)))
+    }
+
+    /// The segment of `stream` in `generation` first in `order` (`1` first,
+    /// `-1` last).
     async fn edge(
         &self,
         handle: &ScopedCollection,
         stream: &str,
+        generation: i64,
         order: i32,
     ) -> Result<Option<Segment>> {
         let found = handle
             .find(
-                doc! {"s": stream},
+                doc! {"s": stream, "g": generation},
                 FindOptions::builder()
                     .sort(doc! {"o": order})
                     .limit(1)
@@ -185,15 +228,16 @@ impl StreamStore for MongoStreams {
         validate_stream(stream)?;
         let handle = self.segments().await?;
         for _ in 0..APPEND_ATTEMPTS {
+            let generation = self.generation(stream).await?;
             let end = self
-                .edge(&handle, stream, -1)
+                .edge(&handle, stream, generation, -1)
                 .await?
                 .map_or(0, |last| last.end);
             if values.is_empty() {
                 return Ok(end);
             }
             match handle
-                .insert_one(new_segment(stream, end, &values)?, None)
+                .insert_one(new_segment(stream, generation, end, &values)?, None)
                 .await
             {
                 Ok(()) => return Ok(end),
@@ -214,9 +258,10 @@ impl StreamStore for MongoStreams {
             return Ok(Vec::new());
         }
         let handle = self.segments().await?;
+        let generation = self.generation(stream).await?;
         let mut cursor = handle
             .cursor(
-                doc! {"s": stream, "e": {"$gt": stored_offset(from).unwrap_or(i64::MAX)}},
+                doc! {"s": stream, "g": generation, "e": {"$gt": stored_offset(from).unwrap_or(i64::MAX)}},
                 FindOptions::builder().sort(doc! {"o": 1}).build(),
             )
             .await
@@ -243,8 +288,9 @@ impl StreamStore for MongoStreams {
     async fn len(&self, stream: &str) -> Result<u64> {
         validate_stream(stream)?;
         let handle = self.segments().await?;
+        let generation = self.generation(stream).await?;
         Ok(self
-            .edge(&handle, stream, -1)
+            .edge(&handle, stream, generation, -1)
             .await?
             .map_or(0, |last| last.end))
     }
@@ -252,12 +298,13 @@ impl StreamStore for MongoStreams {
     async fn truncate_before(&self, stream: &str, offset: u64) -> Result<u64> {
         validate_stream(stream)?;
         let handle = self.segments().await?;
-        let Some(last) = self.edge(&handle, stream, -1).await? else {
+        let generation = self.generation(stream).await?;
+        let Some(last) = self.edge(&handle, stream, generation, -1).await? else {
             return Ok(0);
         };
         let affected = handle
             .find(
-                doc! {"s": stream, "o": {"$lt": stored_offset(offset).unwrap_or(i64::MAX)}},
+                doc! {"s": stream, "g": generation, "o": {"$lt": stored_offset(offset).unwrap_or(i64::MAX)}},
                 FindOptions::builder().sort(doc! {"o": 1}).build(),
             )
             .await
@@ -306,8 +353,20 @@ impl StreamStore for MongoStreams {
     async fn delete_stream(&self, stream: &str) -> Result<bool> {
         validate_stream(stream)?;
         let handle = self.segments().await?;
+        let current = self.generation(stream).await?;
+        // Advance first: from here on every reader ignores the old segments,
+        // and an append still holding the old generation lands among them.
+        self.heads()
+            .update_one(
+                doc! {"_id": head_id(&self.scope, stream), "n": stream},
+                doc! {"$inc": {"g": 1_i64}},
+                true,
+                None,
+            )
+            .await
+            .map_err(errors::failed("delete a stream"))?;
         let removed = handle
-            .delete_many(doc! {"s": stream}, None)
+            .delete_many(doc! {"s": stream, "g": {"$lte": current}}, None)
             .await
             .map_err(errors::failed("delete a stream"))?;
         Ok(removed > 0)
@@ -315,18 +374,35 @@ impl StreamStore for MongoStreams {
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {
         let handle = self.segments().await?;
-        let names = handle
-            .distinct("s", doc! {"s": prefix_regex(prefix)})
+        let present = handle
+            .aggregate(
+                doc! {"s": prefix_regex(prefix)},
+                vec![doc! {"$group": {"_id": {"s": "$s", "g": "$g"}}}],
+            )
             .await
             .map_err(errors::failed("list streams"))?;
-        let mut names: Vec<String> = names
-            .into_iter()
-            .filter_map(|name| match name {
-                Bson::String(name) if name.starts_with(prefix) => Some(name),
-                _ => None,
+        let heads = self
+            .heads()
+            .find(doc! {"n": prefix_regex(prefix)}, FindOptions::default())
+            .await
+            .map_err(errors::failed("list streams"))?;
+        let generations: std::collections::HashMap<&str, i64> = heads
+            .iter()
+            .filter_map(|head| Some((head.get_str("n").ok()?, head.get_i64("g").ok()?)))
+            .collect();
+        let mut names: Vec<String> = present
+            .iter()
+            .filter_map(|group| {
+                let key = group.get_document("_id").ok()?;
+                let name = key.get_str("s").ok()?;
+                let generation = key.get_i64("g").unwrap_or(0);
+                (name.starts_with(prefix)
+                    && generations.get(name).copied().unwrap_or(0) == generation)
+                    .then(|| name.to_owned())
             })
             .collect();
         names.sort();
+        names.dedup();
         Ok(names)
     }
 }

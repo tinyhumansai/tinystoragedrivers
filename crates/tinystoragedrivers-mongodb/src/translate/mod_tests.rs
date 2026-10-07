@@ -213,6 +213,12 @@ fn sort_plans_rank_then_value_then_key() {
     assert_eq!(by_key.unset, Vec::<String>::new());
 
     assert_eq!(sort_plan(&[Sort::asc("a.$b")]), None);
+    assert_eq!(sort_plan(&[Sort::asc("items.0")]), None);
+    assert_eq!(sort_plan(&[Sort::asc("items.0.name")]), None);
+    assert!(
+        sort_plan(&[Sort::asc("0.name")]).is_some(),
+        "the body is an object"
+    );
 }
 
 #[test]

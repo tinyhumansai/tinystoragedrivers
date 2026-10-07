@@ -12,6 +12,15 @@ port="${1:-27017}"
 image="${2:-mongo:7}"
 name="tsd-mongo"
 
+# Remove the container if startup fails, so a retry on the same runner can
+# reuse the name; on success it stays up for the tests.
+cleanup() {
+  if [[ $? -ne 0 ]]; then
+    docker rm -f "$name" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
 docker run -d --rm --name "$name" -p "127.0.0.1:${port}:27017" "$image" \
   --replSet rs0 --bind_ip_all >/dev/null
 

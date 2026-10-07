@@ -121,6 +121,19 @@ pub(crate) fn duplicate_index(error: &Error) -> Option<String> {
     Some(duplicate_key_index(message).unwrap_or_default().to_owned())
 }
 
+/// Whether `error` is GridFS reporting a file or chunk that is not there.
+pub(crate) fn is_gridfs(error: &Error) -> bool {
+    matches!(error.kind.as_ref(), MongoKind::GridFs(_))
+}
+
+/// [`is_gridfs`] for a stream's I/O error.
+pub(crate) fn io_is_gridfs(error: &std::io::Error) -> bool {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<Error>())
+        .is_some_and(is_gridfs)
+}
+
 /// Whether the server labelled `error` as safe to retry the whole transaction.
 pub(crate) fn is_transient(error: &Error) -> bool {
     error.contains_label("TransientTransactionError")

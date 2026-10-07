@@ -301,7 +301,10 @@ pub(crate) struct SortPlan {
 }
 
 /// Plan a server-side sort, or `None` when a sort path cannot be evaluated by
-/// an aggregation expression.
+/// an aggregation expression exactly as [`value::lookup`] would (a `$`
+/// segment, or a numeric segment past the first).
+///
+/// [`value::lookup`]: tinystoragedrivers_core::value::lookup
 pub(crate) fn sort_plan(sorts: &[Sort]) -> Option<SortPlan> {
     let mut add_fields = Document::new();
     let mut complex = Vec::new();
@@ -310,7 +313,10 @@ pub(crate) fn sort_plan(sorts: &[Sort]) -> Option<SortPlan> {
     for (index, key) in sorts.iter().enumerate() {
         let source = if key.field == ID_FIELD {
             format!("${KEY}")
-        } else if key.field.split('.').any(|segment| segment.starts_with('$')) {
+        } else if !matches!(classify(&key.field), Path::Plain(_)) {
+            // `$` segments are operators to Mongo, and a numeric segment is an
+            // array position to `value::lookup` but a field name to an
+            // aggregation path: sort these in Rust.
             return None;
         } else {
             format!("${}", body_field(&key.field))

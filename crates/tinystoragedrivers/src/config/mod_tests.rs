@@ -159,13 +159,14 @@ fn a_question_mark_in_a_password_stays_hidden() {
 #[cfg(feature = "mongodb")]
 #[tokio::test]
 async fn opens_a_mongodb_url_with_the_driver() {
-    // Nothing listens on port 1, so this proves the URL reaches the driver
-    // (which reports the server as unavailable) without needing one.
-    let config = StorageConfig::parse(
-        "mongodb://app:s3cret@127.0.0.1:1/db?serverSelectionTimeoutMS=100&connectTimeoutMS=100",
-    )
-    .unwrap();
+    // A port that is not a number fails the driver's own URI parse before
+    // any I/O, so this proves the URL reaches the driver without a network.
+    let config = StorageConfig::parse("mongodb://app:s3cret@h:notaport/db").unwrap();
     let error = open(&config).await.map(|_| ()).unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::Unavailable);
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(
+        !error.message().contains("not available in this build"),
+        "the driver, not the missing-feature arm, answered: {error}"
+    );
     assert!(!error.to_string().contains("s3cret"), "{error}");
 }

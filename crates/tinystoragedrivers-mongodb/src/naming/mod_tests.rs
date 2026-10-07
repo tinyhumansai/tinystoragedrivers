@@ -91,12 +91,3 @@ fn reads_the_index_out_of_duplicate_key_messages() {
     assert_eq!(duplicate_key_index("something else"), None);
     assert_eq!(duplicate_key_index("index: "), None);
 }
-
-#[test]
-fn tombstones_are_keyed_by_collection_scope_and_key() {
-    let scope = Scope::new("alice").unwrap();
-    assert_eq!(
-        tombstone_id("jobs", &scope, "k"),
-        doc! {"c": "jobs", "s": "alice", "k": "k"}
-    );
-}
