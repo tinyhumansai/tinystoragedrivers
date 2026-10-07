@@ -15,6 +15,8 @@ publish = false
 # The ports, the memory driver and the shared types. Re-exported wholesale so a
 # consumer takes one dependency.
 tinystoragedrivers-core = { workspace = true }
+# The `SecretStore` port and its drivers, re-exported as `secrets`.
+tinystoragedrivers-secrets = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The integration test runs the conformance suite through the facade.
@@ -27,7 +29,12 @@ default = []
 # Re-export the core's synchronous bridge.
 blocking = ["tinystoragedrivers-core/blocking"]
 # Re-export the core's conformance suite for downstream repository tests.
-testkit = ["tinystoragedrivers-core/testkit"]
+testkit = ["tinystoragedrivers-core/testkit", "tinystoragedrivers-secrets?/testkit"]
+# Re-export `tinystoragedrivers-secrets` as `tinystoragedrivers::secrets`:
+# encrypted secrets in memory, a `secrets.enc` file, or any `DocumentStore`.
+secrets = ["dep:tinystoragedrivers-secrets"]
+# `secrets::KeyringSecrets`, over the native OS credential stores.
+keyring = ["secrets", "tinystoragedrivers-secrets/keyring"]
 
 [lints]
 workspace = true

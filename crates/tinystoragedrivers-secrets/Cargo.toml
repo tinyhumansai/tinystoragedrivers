@@ -1,0 +1,49 @@
+[package]
+name = "tinystoragedrivers-secrets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Encrypted secret storage for tinystoragedrivers: one SecretStore port over the OS keyring, an encrypted file, or any DocumentStore."
+readme = "README.md"
+keywords = ["secrets", "keyring", "encryption", "storage"]
+categories = ["cryptography", "database"]
+publish = false
+
+[dependencies]
+tinystoragedrivers-core = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+# File and keyring operations block (disk I/O, an advisory lock, an OS keychain
+# prompt), so they run on the runtime's blocking pool when one is present.
+tokio = { workspace = true }
+# The AEAD OpenHuman already uses for `enc2:` values and `secrets.enc`; the same
+# crate and version keeps existing ciphertext decrypting byte-for-byte. Its
+# default `getrandom` feature supplies the OS nonce and key generator.
+chacha20poly1305 = "0.10"
+# Per-scope data keys: HKDF-SHA256 over a master key, the scope as `info`.
+hkdf = "0.12"
+sha2 = "0.10"
+# Keys, decrypted values and the decrypted secrets map are wiped on drop.
+zeroize = "1"
+# The cross-process advisory lock on `secrets.enc.lock`. It takes the same
+# `flock`/`LockFileEx` lock OpenHuman's `fs2` lock does, so the two interoperate.
+fs4 = { version = "1", default-features = false, features = ["sync"] }
+# The native OS credential stores, with the platform features OpenHuman ships.
+keyring = { version = "3", optional = true, features = ["apple-native", "windows-native", "linux-native"] }
+
+[dev-dependencies]
+tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync"] }
+
+[features]
+default = []
+# `KeyringSecrets`: secrets in the OS credential store (macOS Keychain, Windows
+# Credential Manager, the Linux kernel keyring).
+keyring = ["dep:keyring"]
+# `testkit::secrets_conformance`: the behavioral suite every `SecretStore` runs.
+testkit = []
+
+[lints]
+workspace = true
