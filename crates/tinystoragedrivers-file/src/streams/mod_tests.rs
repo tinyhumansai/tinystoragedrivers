@@ -168,3 +168,56 @@ fn length_prefers_the_larger_of_base_and_the_last_line() {
         8
     );
 }
+
+#[tokio::test]
+async fn an_exhausted_offset_space_is_an_error() {
+    let (_dir, storage, streams) = open();
+    streams.append("s", json!(0)).await.unwrap();
+    let (data, _) = files(&storage, "s");
+    std::fs::write(
+        &data,
+        format!("{{\"offset\":{},\"value\":0}}\n", u64::MAX - 1),
+    )
+    .unwrap();
+    assert_eq!(streams.len("s").await.unwrap(), u64::MAX);
+    assert_eq!(streams.append_batch("s", vec![]).await.unwrap(), u64::MAX);
+    assert_eq!(
+        streams.append("s", json!(1)).await.unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+    std::fs::write(&data, format!("{{\"offset\":{},\"value\":0}}\n", u64::MAX)).unwrap();
+    assert_eq!(
+        streams.len("s").await.unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+    assert_eq!(
+        streams.append("s", json!(1)).await.unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+}
+
+#[tokio::test]
+async fn a_new_stream_ignores_an_orphaned_data_file() {
+    let (_dir, storage, streams) = open();
+    let (data, _) = files(&storage, "s");
+    std::fs::create_dir_all(data.parent().unwrap()).unwrap();
+    std::fs::write(&data, "{\"offset\":7,\"value\":0}\n").unwrap();
+    assert_eq!(streams.append("s", json!(1)).await.unwrap(), 0);
+    assert_eq!(streams.len("s").await.unwrap(), 1);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_failed_append_leaves_nothing_behind() {
+    let (_dir, storage, streams) = open();
+    let (data, _) = files(&storage, "s");
+    std::fs::create_dir_all(data.parent().unwrap()).unwrap();
+    // Every write to /dev/full fails with "no space left on device".
+    std::os::unix::fs::symlink("/dev/full", &data).unwrap();
+    assert_eq!(
+        streams.append("s", json!(1)).await.unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+    assert_eq!(streams.len("s").await.unwrap(), 0);
+    assert_eq!(streams.streams("").await.unwrap().len(), 0);
+}

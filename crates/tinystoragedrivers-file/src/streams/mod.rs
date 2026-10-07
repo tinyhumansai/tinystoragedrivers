@@ -105,6 +105,11 @@ fn read_meta(paths: &Paths, name: &str) -> Result<Option<StreamMeta>> {
     }
 }
 
+/// The error for a stream whose next offset would not fit a `u64`.
+fn exhausted() -> StorageError {
+    StorageError::backend("stream offset space is exhausted")
+}
+
 fn collision() -> StorageError {
     StorageError::backend("file storage name hash collision; refusing to touch another stream")
 }
@@ -145,7 +150,10 @@ fn tail(file: &mut File) -> Result<(u64, Option<Vec<u8>>)> {
 /// line's offset, or `base` when that is larger (or there are no lines).
 fn length(meta: &StreamMeta, last_line: Option<&[u8]>) -> Result<u64> {
     let after_last = match last_line {
-        Some(line) => serde_json::from_slice::<Line>(line)?.offset + 1,
+        Some(line) => serde_json::from_slice::<Line>(line)?
+            .offset
+            .checked_add(1)
+            .ok_or_else(exhausted)?,
         None => 0,
     };
     Ok(meta.base.max(after_last))
@@ -202,31 +210,45 @@ impl StreamStore for FileStreams {
     async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64> {
         let name = stream.to_owned();
         self.with(stream, move |paths| {
-            let meta = read_meta(paths, &name)?;
+            let existing = read_meta(paths, &name)?;
             if values.is_empty() {
-                return meta.map_or(Ok(0), |meta| stream_len(paths, &meta));
+                return existing.map_or(Ok(0), |meta| stream_len(paths, &meta));
             }
-            let meta = if let Some(meta) = meta {
-                meta
-            } else {
-                let meta = StreamMeta { name, base: 0 };
-                write_json(&paths.meta, &meta)?;
-                meta
-            };
+            let created = existing.is_none();
+            let meta = existing.unwrap_or(StreamMeta { name, base: 0 });
             let mut file = open_append(&paths.data)?;
-            let (complete_end, last) = tail(&mut file)?;
+            // A data file without a meta file is an orphan a failed delete
+            // left; a new stream starts empty rather than inheriting it.
+            let (complete_end, last) = if created { (0, None) } else { tail(&mut file)? };
             let first = length(&meta, last.as_deref())?;
-            let write_error = io_error("append to a stream file");
-            // Cut off a torn line a crashed append left, so the new lines
-            // start on a line boundary.
-            file.set_len(complete_end).map_err(&write_error)?;
+            if first.checked_add(values.len() as u64).is_none() {
+                return Err(exhausted());
+            }
             let mut bytes = Vec::new();
             for (offset, value) in (first..).zip(values) {
                 serde_json::to_writer(&mut bytes, &Line { offset, value })?;
                 bytes.push(b'\n');
             }
-            file.write_all(&bytes).map_err(&write_error)?;
-            file.sync_data().map_err(&write_error)?;
+            if created {
+                write_json(&paths.meta, &meta)?;
+            }
+            // Cut off a torn line a crashed append left, so the new lines
+            // start on a line boundary, then append and flush.
+            let written = file
+                .set_len(complete_end)
+                .and_then(|()| file.write_all(&bytes))
+                .and_then(|()| file.sync_data());
+            if let Err(error) = written {
+                // Nothing may stay appended on failure: roll the file back to
+                // its last complete line, and forget a stream this call
+                // created. Best effort; the error reported is the original.
+                let _ = file.set_len(complete_end);
+                let _ = file.sync_data();
+                if created {
+                    let _ = remove_optional(&paths.meta);
+                }
+                return Err(io_error("append to a stream file")(error));
+            }
             Ok(first)
         })
         .await
