@@ -30,6 +30,10 @@ jobs:
     name: Prepare release
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
+    env:
+      # The MongoDB driver's `live_*` tests run against this server, and the
+      # coverage gate counts them, exactly as in CI.
+      TSD_MONGO_URL: mongodb://localhost:27017/tsd_test?directConnection=true
     outputs:
       crate_name: ${{ steps.version.outputs.crate_name }}
       next_version: ${{ steps.version.outputs.next_version }}
@@ -48,6 +52,9 @@ jobs:
           tool: cargo-llvm-cov
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Start a MongoDB replica set
+        run: .github/scripts/start-mongo-replset.sh 27017
 
       - name: Check formatting
         run: cargo fmt --all -- --check
