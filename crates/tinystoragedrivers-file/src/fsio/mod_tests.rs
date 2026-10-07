@@ -190,3 +190,14 @@ fn a_symlink_is_refused_for_reads_and_appends() {
     assert!(open_append(&link).is_err());
     assert_eq!(std::fs::read(&real).unwrap(), b"data");
 }
+
+#[test]
+fn creating_a_nested_hierarchy_is_durable_and_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let nested = dir.path().join("a/b/c");
+    create_dir_durable(&nested).unwrap();
+    assert!(nested.is_dir());
+    create_dir_durable(&nested).unwrap();
+    write_atomic(&dir.path().join("x/y/file.json"), b"{}").unwrap();
+    assert!(dir.path().join("x/y/file.json").is_file());
+}

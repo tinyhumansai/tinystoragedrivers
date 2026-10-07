@@ -137,7 +137,7 @@ pub(crate) fn write_atomic_with(
     fill: impl FnOnce(&mut File) -> Result<()>,
 ) -> Result<()> {
     let dir = parent(path)?;
-    fs::create_dir_all(dir).map_err(io_error("create a directory"))?;
+    create_dir_durable(dir)?;
     let (temp, mut out) = create_temp(dir)?;
     let written = (|| {
         fill(&mut out)?;
@@ -168,6 +168,23 @@ fn create_temp(dir: &Path) -> Result<(PathBuf, File)> {
     Err(StorageError::backend(
         "file storage could not find a free temporary file name",
     ))
+}
+
+/// `create_dir_all`, then sync the parent of every directory it created, so
+/// the whole new hierarchy (not just its leaf) survives a crash.
+pub(crate) fn create_dir_durable(dir: &Path) -> Result<()> {
+    let mut missing = Vec::new();
+    for ancestor in dir.ancestors() {
+        if ancestor.as_os_str().is_empty() || ancestor.exists() {
+            break;
+        }
+        missing.push(ancestor);
+    }
+    fs::create_dir_all(dir).map_err(io_error("create a directory"))?;
+    for created in missing {
+        sync_dir(parent(created)?)?;
+    }
+    Ok(())
 }
 
 /// Flush a directory entry change (a rename or a new file) to disk. Windows
@@ -228,7 +245,7 @@ pub(crate) fn files_with_suffix(dir: &Path, suffix: &str) -> Result<Vec<PathBuf>
 /// Open `path` for appending, creating it (and its directory) when missing.
 /// A symlink at `path` is refused, not followed.
 pub(crate) fn open_append(path: &Path) -> Result<File> {
-    fs::create_dir_all(parent(path)?).map_err(io_error("create a directory"))?;
+    create_dir_durable(parent(path)?)?;
     no_follow(OpenOptions::new().read(true).append(true).create(true))
         .open(path)
         .and_then(require_regular)

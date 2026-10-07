@@ -93,7 +93,15 @@ fn head(paths: &Paths, key: &str) -> Result<Option<BlobMeta>> {
 /// Combine a sidecar with its data file's size; `None` when the data file is
 /// missing.
 fn meta(data: &Path, sidecar: Sidecar) -> Result<Option<BlobMeta>> {
-    match std::fs::metadata(data) {
+    // `symlink_metadata` does not follow a link, so a planted symlink or
+    // directory is refused here exactly as `get` refuses it.
+    match std::fs::symlink_metadata(data).and_then(|stat| {
+        if stat.file_type().is_file() {
+            Ok(stat)
+        } else {
+            Err(std::io::Error::other("not a regular file"))
+        }
+    }) {
         Ok(stat) => Ok(Some(BlobMeta {
             key: sidecar.key,
             len: stat.len(),

@@ -121,6 +121,10 @@ async fn a_symlinked_payload_is_refused_for_whole_and_ranged_reads() {
     std::os::unix::fs::symlink(&victim, &data).unwrap();
     assert_eq!(blobs.get("a").await.unwrap_err().kind(), ErrorKind::Backend);
     assert_eq!(
+        blobs.head("a").await.unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+    assert_eq!(
         blobs.get_range("a", 0..2).await.unwrap_err().kind(),
         ErrorKind::Backend
     );
