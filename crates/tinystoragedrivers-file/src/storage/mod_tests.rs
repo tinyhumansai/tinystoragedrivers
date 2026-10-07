@@ -63,3 +63,30 @@ async fn a_panicking_task_is_a_backend_error() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Backend);
 }
+
+#[test]
+fn windows_device_names_become_encoded_database_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = FileStorage::open(dir.path()).unwrap();
+    storage.database("con").unwrap();
+    assert!(storage.dir().join("databases/%63on").is_dir());
+    assert!(!storage.dir().join("databases/con").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_database_directory_shares_the_targets_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = FileStorage::open(dir.path()).unwrap();
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    std::fs::create_dir(dir.path().join("databases")).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("databases/linked")).unwrap();
+    let linked = storage.database("linked").unwrap();
+    let direct = FileStorage::open(&real).unwrap();
+    assert!(format!("{linked:?}").contains(real.canonicalize().unwrap().to_str().unwrap()));
+    assert!(Arc::ptr_eq(
+        &lock_for(&real.canonicalize().unwrap()),
+        &direct.db.lock
+    ));
+}

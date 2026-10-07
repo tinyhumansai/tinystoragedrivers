@@ -69,44 +69,81 @@ fn temp_path(dir: &Path) -> PathBuf {
     ))
 }
 
-/// The directory holding `path`.
+/// The directory holding `path`. A bare file name (`state.json`) lives in the
+/// current directory; only a path with no parent at all (`/`) is refused.
 fn parent(path: &Path) -> Result<&Path> {
-    path.parent()
-        .ok_or_else(|| StorageError::backend("file storage path has no parent directory"))
+    match path.parent() {
+        Some(dir) if dir.as_os_str().is_empty() => Ok(Path::new(".")),
+        Some(dir) => Ok(dir),
+        None => Err(StorageError::backend(
+            "file storage path has no parent directory",
+        )),
+    }
 }
 
 /// Replace `path` with `bytes`: write a sibling temporary file, flush it, and
 /// rename it into place. Creates the directory when missing.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_atomic_with(path, |file| {
+        file.write_all(bytes).map_err(io_error("write a file"))
+    })
+}
+
+/// [`write_atomic`] with the content produced by `fill`, which writes straight
+/// into the temporary file so a large file is never held in memory.
+///
+/// The temporary file is created exclusively (`create_new`), so a name planted
+/// beforehand, including a symlink, is never opened or followed.
+pub(crate) fn write_atomic_with(
+    path: &Path,
+    fill: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<()> {
     let dir = parent(path)?;
     fs::create_dir_all(dir).map_err(io_error("create a directory"))?;
-    let temp = temp_path(dir);
+    let (temp, mut out) = create_temp(dir)?;
     let written = (|| {
-        let mut file = File::create(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temp, path)
+        fill(&mut out)?;
+        out.sync_all().map_err(io_error("write a file"))?;
+        drop(out);
+        fs::rename(&temp, path).map_err(io_error("write a file"))
     })();
     if let Err(error) = written {
         // Best effort: the temporary file is invisible to listings anyway.
         let _ = fs::remove_file(&temp);
-        return Err(io_error("write a file")(error));
+        return Err(error);
     }
-    sync_dir(dir);
-    Ok(())
+    sync_dir(dir)
+}
+
+/// Exclusively create a fresh temporary file in `dir`, retrying with a new name
+/// when one is already taken.
+fn create_temp(dir: &Path) -> Result<(PathBuf, File)> {
+    const ATTEMPTS: usize = 16;
+    for _ in 0..ATTEMPTS {
+        let temp = temp_path(dir);
+        match OpenOptions::new().write(true).create_new(true).open(&temp) {
+            Ok(file) => return Ok((temp, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(io_error("write a file")(error)),
+        }
+    }
+    Err(StorageError::backend(
+        "file storage could not find a free temporary file name",
+    ))
 }
 
 /// Flush a directory entry change (a rename or a new file) to disk. Windows
 /// cannot open a directory for this and orders renames itself, so it is a
-/// no-op there; failures are ignored because the data itself is already
-/// durable and only the rename's persistence is at stake.
-pub(crate) fn sync_dir(dir: &Path) {
+/// no-op there. Elsewhere a failure is reported: without it the new entry may
+/// not survive a crash, which a durable write must not claim.
+pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
     #[cfg(unix)]
-    if let Ok(handle) = File::open(dir) {
-        let _ = handle.sync_all();
-    }
+    File::open(dir)
+        .and_then(|handle| handle.sync_all())
+        .map_err(io_error("sync a directory"))?;
     #[cfg(not(unix))]
     let _ = dir;
+    Ok(())
 }
 
 /// Remove a file, reporting whether it existed.

@@ -31,7 +31,8 @@ use tinystoragedrivers_core::{
 
 use crate::encode::file_stem;
 use crate::fsio::{
-    files_with_suffix, io_error, open_append, read_json, remove_optional, write_atomic, write_json,
+    files_with_suffix, io_error, open_append, read_json, remove_optional, write_atomic_with,
+    write_json,
 };
 use crate::storage::Db;
 
@@ -241,11 +242,19 @@ impl StreamStore for FileStreams {
             if let Err(error) = written {
                 // Nothing may stay appended on failure: roll the file back to
                 // its last complete line, and forget a stream this call
-                // created. Best effort; the error reported is the original.
-                let _ = file.set_len(complete_end);
-                let _ = file.sync_data();
-                if created {
-                    let _ = remove_optional(&paths.meta);
+                // created. If the rollback itself fails the stream's state is
+                // unknown, and the error says so rather than claiming a clean
+                // failure.
+                let rolled_back = file
+                    .set_len(complete_end)
+                    .and_then(|()| file.sync_data())
+                    .is_ok();
+                let forgotten = !created || remove_optional(&paths.meta).is_ok();
+                if !(rolled_back && forgotten) {
+                    return Err(StorageError::backend(
+                        "file storage could not append to a stream file and could not roll it back; the stream's contents are indeterminate",
+                    )
+                    .with_source(error));
                 }
                 return Err(io_error("append to a stream file")(error));
             }
@@ -287,18 +296,33 @@ impl StreamStore for FileStreams {
             }
             meta.base = cut;
             write_json(&paths.meta, &meta)?;
-            let mut kept = Vec::new();
-            for entry in read_lines(paths, cut, usize::MAX)? {
-                serde_json::to_writer(
-                    &mut kept,
-                    &Line {
-                        offset: entry.offset,
-                        value: entry.value,
-                    },
-                )?;
-                kept.push(b'\n');
-            }
-            write_atomic(&paths.data, &kept)?;
+            // Copy the retained lines into the replacement file one at a
+            // time: memory stays at one line however long the stream is.
+            let source = File::open(&paths.data);
+            let source = match source {
+                Ok(file) => Some(file),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(io_error("open a stream file")(error)),
+            };
+            write_atomic_with(&paths.data, |out| {
+                let Some(source) = source else { return Ok(()) };
+                let mut reader = BufReader::new(source);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    let read = reader
+                        .read_until(b'\n', &mut line)
+                        .map_err(io_error("read a stream file"))?;
+                    // End of file, or a torn final line, which is dropped.
+                    if read == 0 || line.last() != Some(&b'\n') {
+                        return Ok(());
+                    }
+                    let parsed: Line = serde_json::from_slice(&line)?;
+                    if parsed.offset >= cut {
+                        out.write_all(&line).map_err(io_error("write a file"))?;
+                    }
+                }
+            })?;
             Ok(removed)
         })
         .await

@@ -42,7 +42,7 @@ use tinystoragedrivers_core::{
 
 use crate::blobs::FileBlobs;
 use crate::documents::FileDocuments;
-use crate::encode::dir_components;
+use crate::encode::{dir_components, file_stem};
 use crate::fsio::io_error;
 use crate::streams::FileStreams;
 
@@ -234,7 +234,15 @@ impl StorageBackend for FileStorage {
         // Named databases share one namespace under the root, as the memory
         // driver's registry does: `database("x")` names the same database
         // from the root or from any other named database.
-        let dir = self.root.join("databases").join(name);
+        // Encoded like every other stored name, so a Windows device name such
+        // as `con` or `com1` is a legal directory. The directory is created
+        // and canonicalized so a symlinked name and a handle opened on its
+        // target share one lock.
+        let dir = self.root.join("databases").join(file_stem(name));
+        std::fs::create_dir_all(&dir).map_err(io_error("create the database directory"))?;
+        let dir = dir
+            .canonicalize()
+            .map_err(io_error("resolve the database directory"))?;
         Ok(Arc::new(Self {
             root: self.root.clone(),
             db: Arc::new(Db::new(dir, Arc::clone(&self.db.clock))),

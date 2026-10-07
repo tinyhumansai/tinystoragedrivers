@@ -137,5 +137,42 @@ fn lists_only_finished_files_with_the_suffix() {
         listed,
         [dir.path().join("a.json"), dir.path().join("b.json")]
     );
-    sync_dir(&dir.path().join("missing"));
+    sync_dir(dir.path()).unwrap();
+    #[cfg(unix)]
+    assert!(sync_dir(&dir.path().join("missing")).is_err());
+}
+
+#[test]
+fn a_bare_file_name_lives_in_the_current_directory() {
+    assert_eq!(parent(Path::new("state.json")).unwrap(), Path::new("."));
+    assert_eq!(parent(Path::new("a/state.json")).unwrap(), Path::new("a"));
+    assert!(parent(Path::new("/")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_planted_temporary_symlink_is_never_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, b"keep").unwrap();
+    // Plant a symlink on every name the next few attempts could pick.
+    let before = temp_path(dir.path());
+    let pid = std::process::id();
+    let first: u64 = before
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .rsplit('-')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    for n in first + 1..first + 4 {
+        std::os::unix::fs::symlink(&victim, dir.path().join(format!(".tmp-{pid}-{n}"))).unwrap();
+    }
+    let target = dir.path().join("out.json");
+    write_atomic(&target, b"new").unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
 }
