@@ -1,0 +1,141 @@
+//! Filesystem helpers: atomic writes, optional reads, listings, error kinds.
+
+use super::*;
+use tinystoragedrivers_core::ErrorKind;
+
+#[test]
+fn maps_transient_io_errors_to_unavailable() {
+    for kind in [
+        io::ErrorKind::WouldBlock,
+        io::ErrorKind::TimedOut,
+        io::ErrorKind::Interrupted,
+    ] {
+        let error = io_error("test")(io::Error::from(kind));
+        assert_eq!(error.kind(), ErrorKind::Unavailable);
+        assert!(std::error::Error::source(&error).is_some());
+    }
+    let error = io_error("do a thing")(io::Error::from(io::ErrorKind::PermissionDenied));
+    assert_eq!(error.kind(), ErrorKind::Backend);
+    assert_eq!(error.message(), "file storage could not do a thing");
+}
+
+#[test]
+fn reads_and_writes_json_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nested").join("v.json");
+    assert_eq!(read_json::<u32>(&path).unwrap(), None);
+    write_json(&path, &7_u32).unwrap();
+    assert_eq!(read_json::<u32>(&path).unwrap(), Some(7));
+    write_json(&path, &8_u32).unwrap();
+    assert_eq!(read_json::<u32>(&path).unwrap(), Some(8));
+    std::fs::write(&path, b"{").unwrap();
+    assert_eq!(
+        read_json::<u32>(&path).unwrap_err().kind(),
+        ErrorKind::Serialization
+    );
+    let leftovers = files_with_suffix(path.parent().unwrap(), "").unwrap();
+    assert_eq!(leftovers, [path], "no temporary file is left behind");
+}
+
+#[test]
+fn reading_a_directory_is_a_backend_error() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        read_optional(dir.path()).unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+}
+
+#[test]
+fn a_failed_write_cleans_up_its_temporary_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("taken");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("child"), b"x").unwrap();
+    let error = write_atomic(&target, b"data").unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Backend);
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["taken"]);
+}
+
+#[test]
+fn a_path_without_a_parent_is_rejected() {
+    assert_eq!(
+        write_atomic(Path::new("/"), b"x").unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+    assert_eq!(
+        open_append(Path::new("/")).unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+}
+
+#[test]
+fn creating_a_directory_under_a_file_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("file");
+    std::fs::write(&file, b"x").unwrap();
+    let below = file.join("sub").join("x.json");
+    assert_eq!(
+        write_atomic(&below, b"x").unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+    assert_eq!(open_append(&below).unwrap_err().kind(), ErrorKind::Backend);
+    assert_eq!(
+        files_with_suffix(&file, ".json").unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+}
+
+#[test]
+fn opening_a_directory_for_append_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    assert_eq!(open_append(&sub).unwrap_err().kind(), ErrorKind::Backend);
+}
+
+#[test]
+fn removes_optionally() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x");
+    assert!(!remove_optional(&path).unwrap());
+    std::fs::write(&path, b"x").unwrap();
+    assert!(remove_optional(&path).unwrap());
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    assert_eq!(
+        remove_optional(&sub).unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+}
+
+#[test]
+fn lists_only_finished_files_with_the_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        files_with_suffix(&dir.path().join("missing"), ".json")
+            .unwrap()
+            .len(),
+        0
+    );
+    for name in ["b.json", "a.json", ".tmp-1-2", "c.txt"] {
+        std::fs::write(dir.path().join(name), b"{}").unwrap();
+    }
+    std::fs::create_dir(dir.path().join("d.json")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = std::ffi::OsStr::from_bytes(b"\xff.json");
+        std::fs::write(dir.path().join(raw), b"{}").unwrap();
+    }
+    let listed = files_with_suffix(dir.path(), ".json").unwrap();
+    assert_eq!(
+        listed,
+        [dir.path().join("a.json"), dir.path().join("b.json")]
+    );
+    sync_dir(&dir.path().join("missing"));
+}

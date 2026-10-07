@@ -1,0 +1,33 @@
+[package]
+name = "tinystoragedrivers-file"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Plain-file driver for tinystoragedrivers: JSON documents, JSONL streams and raw blobs under one directory."
+readme = "README.md"
+keywords = ["storage", "json", "jsonl", "files", "driver"]
+categories = ["database", "filesystem"]
+publish = false
+
+[dependencies]
+# The ports this crate implements, and the filter, sort and value rules every
+# driver shares with the memory driver.
+tinystoragedrivers-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# File IO is blocking; every operation runs on tokio's blocking pool
+# (`spawn_blocking`) when a runtime is present, so a current-thread runtime is
+# never stalled by disk latency.
+tokio = { workspace = true }
+
+[dev-dependencies]
+# The conformance suite every driver runs.
+tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
