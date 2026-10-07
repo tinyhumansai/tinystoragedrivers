@@ -109,3 +109,19 @@ fn a_missing_data_file_has_no_meta() {
         ErrorKind::Backend
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlinked_payload_is_refused_for_whole_and_ranged_reads() {
+    let (dir, storage, blobs) = open();
+    blobs.put("a", b"hello".to_vec(), None).await.unwrap();
+    let (data, _) = files(&storage, "a");
+    let victim = dir.path().join("victim");
+    std::fs::rename(&data, &victim).unwrap();
+    std::os::unix::fs::symlink(&victim, &data).unwrap();
+    assert_eq!(blobs.get("a").await.unwrap_err().kind(), ErrorKind::Backend);
+    assert_eq!(
+        blobs.get_range("a", 0..2).await.unwrap_err().kind(),
+        ErrorKind::Backend
+    );
+}

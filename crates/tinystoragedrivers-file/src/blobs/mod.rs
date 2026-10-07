@@ -9,7 +9,6 @@
 //! either the old blob, or (when replacing) the new bytes under the old
 //! content type, never a blob without bytes.
 
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -23,8 +22,8 @@ use tinystoragedrivers_core::{
 
 use crate::encode::file_stem;
 use crate::fsio::{
-    files_with_suffix, io_error, read_json, read_optional, remove_optional, write_atomic,
-    write_json,
+    files_with_suffix, io_error, open_read, read_json, read_optional, remove_optional,
+    write_atomic, write_json,
 };
 use crate::storage::Db;
 
@@ -158,7 +157,7 @@ impl BlobStore for FileBlobs {
             let len = usize::try_from(meta.len).unwrap_or(usize::MAX);
             let range = clamp_range(&range, len)?;
             let read_error = io_error("read a blob");
-            let mut file = File::open(&paths.data).map_err(&read_error)?;
+            let mut file = open_read(&paths.data).map_err(&read_error)?;
             file.seek(SeekFrom::Start(range.start as u64))
                 .map_err(&read_error)?;
             let mut bytes = Vec::with_capacity(range.len());
