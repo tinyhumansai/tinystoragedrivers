@@ -19,8 +19,10 @@ ships on its own and is tagged before the next step depends on it.
    - **Directory mode**: `database(name)` maps to `<dir>/<name>.db`.
    - **rusqlite.** Pin `=0.40.2` with `bundled` to match OpenHuman, because
      `libsqlite3-sys` is a `links` crate.
-3. **`tinystoragedrivers-file`.** JSON documents, JSONL streams, and blobs
-   at caller-chosen paths, so today's desktop files stay where they are.
+3. **`tinystoragedrivers-file`.** JSON documents, JSONL streams and blobs in
+   a fixed, human-inspectable layout under one root. OpenHuman's existing
+   desktop JSON files are imported into it on first open rather than read in
+   place.
 4. **`tinystoragedrivers-secrets`.** `SecretStore`, the `enc2:`
    ChaCha20-Poly1305 envelope (moved from OpenHuman with the byte format
    unchanged), `KeyProvider`, an OS keyring driver, and an encrypted-file
