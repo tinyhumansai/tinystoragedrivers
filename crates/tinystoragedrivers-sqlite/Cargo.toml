@@ -1,0 +1,32 @@
+[package]
+name = "tinystoragedrivers-sqlite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "SQLite driver for tinystoragedrivers: generic document, stream and blob tables, FTS5 search, and raw access for owners that keep their own tables."
+readme = "README.md"
+keywords = ["storage", "database", "driver", "sqlite"]
+categories = ["database"]
+publish = false
+
+[dependencies]
+tinystoragedrivers-core = { workspace = true }
+# SQLite with the bundled amalgamation (FTS5 and JSON functions included).
+# Pinned exactly: `libsqlite3-sys` is a `links = "sqlite3"` crate, so every
+# crate in a host's graph must resolve the same version, and OpenHuman pins
+# 0.40.2.
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+serde_json = { workspace = true }
+# Database calls run on the blocking pool so they never stall a runtime
+# worker.
+tokio = { workspace = true }
+
+[dev-dependencies]
+tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt"] }
+tempfile = "3"
+
+[lints]
+workspace = true
