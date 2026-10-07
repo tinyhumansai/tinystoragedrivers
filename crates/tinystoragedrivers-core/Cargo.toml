@@ -1,0 +1,36 @@
+[package]
+name = "tinystoragedrivers-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Storage ports, the in-memory driver and the driver conformance suite for tinystoragedrivers."
+readme = "README.md"
+keywords = ["storage", "database", "driver", "sqlite", "mongodb"]
+categories = ["database"]
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Only the blocking bridge needs a runtime of its own; hosts whose consumer
+# traits are all async never compile it.
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "sync"] }
+
+[features]
+default = []
+# `Blocking`: run a port's future from synchronous code on a dedicated runtime
+# thread. For consumer traits that are still synchronous.
+blocking = ["dep:tokio"]
+# `conformance`: the behavioral suite every driver must pass. Drivers enable it
+# from their dev-dependencies.
+testkit = []
+
+[lints]
+workspace = true

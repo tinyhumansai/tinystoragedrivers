@@ -5,7 +5,7 @@ minimum="${1:-90}"
 report="${2:-coverage.json}"
 workspace_root="$(pwd -P)/"
 # Every crate lives under `crates/<package>/src/`, so one prefix covers the
-# whole workspace. Vendored submodules and `worktrees/` sit outside it and are
+# whole workspace. `worktrees/` sits outside it and is
 # excluded by the same test.
 source_root="${workspace_root}crates/"
 

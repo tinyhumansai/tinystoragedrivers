@@ -1,0 +1,7 @@
+# Tests report failures by panicking; the workspace `unwrap_used`,
+# `expect_used` and `panic` lints are for library code paths.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+# Product names that appear throughout the docs and are not code identifiers.
+doc-valid-idents = ["SQLite", "MongoDB", "GridFS", "OpenHuman", ".."]

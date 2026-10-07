@@ -1,0 +1,33 @@
+[package]
+name = "tinystoragedrivers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pluggable storage for OpenHuman: one set of ports, feature-gated SQLite, MongoDB, file and memory drivers selected by URL."
+readme = "../../README.md"
+keywords = ["storage", "database", "driver", "sqlite", "mongodb"]
+categories = ["database"]
+publish = false
+
+[dependencies]
+# The ports, the memory driver and the shared types. Re-exported wholesale so a
+# consumer takes one dependency.
+tinystoragedrivers-core = { workspace = true }
+
+[dev-dependencies]
+# The integration test runs the conformance suite through the facade.
+tinystoragedrivers-core = { workspace = true, features = ["testkit"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde_json = { workspace = true }
+
+[features]
+default = []
+# Re-export the core's synchronous bridge.
+blocking = ["tinystoragedrivers-core/blocking"]
+# Re-export the core's conformance suite for downstream repository tests.
+testkit = ["tinystoragedrivers-core/testkit"]
+
+[lints]
+workspace = true
