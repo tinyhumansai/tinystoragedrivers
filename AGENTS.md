@@ -4,90 +4,57 @@ This file is the single source of truth for how humans and coding agents work
 in this repository. `CLAUDE.md` is a symlink to this file, so every agent reads
 the same instructions.
 
-When you generate a new project from this template, keep this file and adapt
-the project-specific parts (crate name, module map, feature flags, commands).
-Delete guidance that no longer applies rather than leaving it to rot.
-
-## Template Checklist
-
-Do this once, in a single commit, before writing feature code:
-
-- [ ] Rename `crates/template` and `crates/template-bus` to the project's crate
-      names, and update `name` in each manifest plus the `template-bus` entry in
-      the root `[workspace.dependencies]`.
-- [ ] Set `description`, `keywords`, and `categories` in each manifest, and
-      `repository` in the root `[workspace.package]`.
-- [ ] Rename the crate references in `README.md`, both `src/lib.rs` files,
-      `crates/template/examples/`, and `crates/template/tests/` (search for
-      `template` and `template_bus`).
-- [ ] Replace the placeholder `greeting` module in both crates with the first
-      real feature area — payload types in the contract crate, behavior in the
-      module crate — keeping the `mod.rs` / `types.rs` / `test.rs` layout.
-- [ ] Confirm `license` and `LICENSE` match the project's intended license.
-- [ ] Update the security contact in `SECURITY.md`.
-- [ ] Rename the TinyBus interface, object path, and member constants in
-      `crates/template-bus/src/names/`, and the matching `provides` / `methods`
-      declarations in `crates/template/src/tinybus_module/`, while keeping
-      `vendor/tinybus` pinned.
-- [ ] Reset `CONTRACT_VERSION` in `crates/template-bus/src/version/` for the new
-      contract.
-- [ ] Replace `ROADMAP.md` with the real plan, or delete it.
-- [ ] Rewrite the "Project Structure" section below to describe this workspace.
-
 ## Project Structure
 
 This is a Rust 2024 cargo workspace rooted at a virtual `Cargo.toml`. Every
 crate lives under `crates/`, one directory per package, each directory named for
-the package it holds. There is no root package: the crate that ships as the
-loadable module is `crates/template`, the same as any other member.
+the package it holds.
 
 ```text
-Cargo.toml              # virtual workspace: members, [workspace.package],
-                        # [workspace.dependencies], [workspace.lints]
+Cargo.toml                    # virtual workspace: members, [workspace.package],
+                              # [workspace.dependencies], [workspace.lints]
+clippy.toml                   # test-code allowances, doc identifier list
 crates/
-├── template-bus/       # the wire contract: what crosses the bus, nothing else
-│   ├── README.md       # why the contract is its own crate
+├── tinystoragedrivers-core/  # the ports and everything driver-independent
 │   └── src/
-│       ├── lib.rs      # crate docs + the entire public re-export surface
-│       ├── names/      # interface, object path, one constant per member
-│       ├── version/    # contract version and the host bind rule
-│       └── <family>/   # one directory per payload family
-└── template/           # the module: behavior, adapter, and the cdylib
-    ├── src/
-    │   ├── lib.rs      # crate docs + public surface, re-exporting the contract
-    │   ├── error/mod.rs      # crate-wide `Error` and `Result<T>`
-    │   ├── tinybus_module/   # TinyBus interface, ABI exports, integration tests
-    │   └── <feature>/        # one directory per feature area
-    │       ├── mod.rs        # module docs, wiring, smallest useful public API
-    │       ├── types.rs      # substantial type definitions
-    │       └── test.rs       # module-local unit tests
-    ├── tests/          # integration tests against the public API only
-    └── examples/       # runnable, compiled-in-CI usage examples
-vendor/tinybus/         # pinned TinyBus host types and module SDK
+│       ├── lib.rs            # crate docs + the entire public surface
+│       ├── error/            # StorageError, ErrorKind, Result
+│       ├── scope/            # Scope, the tenant key
+│       ├── capabilities/     # optional driver abilities
+│       ├── value/            # JSON ordering, lookup, merge patch, tokens
+│       ├── filter/           # Filter, Sort, reference evaluation
+│       ├── document/         # DocumentStore + types + typed extension
+│       ├── stream/           # StreamStore
+│       ├── blob/             # BlobStore
+│       ├── backend/          # StorageBackend, ScopedStorage, databases
+│       ├── memory/           # the reference driver
+│       ├── blocking/         # sync bridge (feature `blocking`)
+│       └── conformance/      # the driver suite (feature `testkit`)
+└── tinystoragedrivers/       # facade: StorageConfig, open(), driver features
 docs/
-├── specs/              # behavior and architecture specifications
-├── plans/              # test-first implementation plans
-└── adr/                # immutable architecture decision records
+├── specs/                    # storage-ports.md: the contract
+├── plans/                    # storage-rollout.md: delivery order
+└── adr/                      # immutable architecture decision records
 ```
 
-### The two-crate split
+### Where code goes
 
-`crates/template-bus` holds every type that crosses the bus and the names of the
-members that carry them. It has no transport, no runtime, and no behavior, and
-CI asserts it stays that way. A host that only makes calls depends on it alone.
+- A port, a value type every driver shares, or behavior every driver must agree
+  on (filter evaluation, value ordering) belongs in `tinystoragedrivers-core`.
+- Anything that links a database client belongs in its own driver crate,
+  `crates/tinystoragedrivers-<driver>/`. The facade forwards it behind a
+  feature of the same name and adds its URL form to `StorageConfig`.
+- `tinystoragedrivers-core` never depends on a database client or a transport.
+  CI asserts this with `cargo tree`.
+- No typed repository for a particular record type (sessions, approvals) lives
+  here. Those belong to the crate that owns the record.
 
-`crates/template` depends on it and re-exports all of it, so
-`template::GreetRequest` and `template_bus::GreetRequest` are the *same* type
-rather than structural twins. That direction is load-bearing: a parallel set of
-payload types for hosts would mean a conversion at every call site that nothing
-checks.
+Every driver crate runs `tinystoragedrivers_core::conformance::run` against
+itself. A driver that disagrees with the memory driver is wrong unless the spec
+says the behavior is driver-defined.
 
-The rule for deciding where something goes: a payload type describes what a
-frame carries and belongs in the contract; anything that answers a frame, holds
-a connection, or touches an engine belongs in the module crate.
-
-Add a crate by creating `crates/<name>/` — `members = ["crates/*"]` picks it up
-by existing. Inherit `version`, `edition`, `rust-version`, `license`, and
+Add a crate by creating `crates/<name>/`. `members = ["crates/*"]` picks it up
+automatically. Inherit `version`, `edition`, `rust-version`, `license`, and
 `repository` from `[workspace.package]`, take shared dependencies from
 `[workspace.dependencies]`, and opt into the shared lint set with:
 
@@ -98,24 +65,22 @@ workspace = true
 
 Each feature area belongs in a focused module directory under a crate's `src/`.
 A module root explains the module, wires its pieces together, and exposes the
-smallest useful API. Move substantial type definitions into `types.rs` and put
-module-local unit tests in a dedicated `test.rs`, wired from the bottom of the
-module root with:
+smallest useful API. Move substantial type definitions into `types.rs`, and put
+module-local unit tests in a sibling `mod_tests.rs` wired from the bottom of the
+module root:
 
 ```rust
 #[cfg(test)]
-mod test;
+#[path = "mod_tests.rs"]
+mod tests;
 ```
 
-Do not accumulate inline `mod tests` blocks in implementation files, and do not
-let a general-purpose `utils.rs` or `helpers.rs` grow — those are a symptom of a
-missing module. Prefer many small modules that each do one thing well over few
-broad ones.
+OpenHuman vendors this repository and its layout check rejects inline
+`mod tests { ... }` blocks and files named `test.rs` or `tests.rs`, so keep to
+this form.
 
 Keep public exports centralized in each crate's `src/lib.rs` so downstream users
-have one predictable surface. Put shared error variants in
-`crates/template/src/error/mod.rs` and return the crate-wide `Result<T>` from
-fallible public APIs.
+have one predictable surface.
 
 ## Build And Test
 
@@ -133,8 +98,7 @@ Supporting commands:
 
 - `cargo fmt --all` — format before committing.
 - `cargo test <filter>` — run a focused subset while iterating.
-- `cargo test -p template-bus` — run one crate's suite.
-- `cargo run -p template --example basic` — run the bundled example.
+- `cargo test -p tinystoragedrivers-core` — run one crate's suite.
 - `cargo doc --no-deps --all-features` — build the rustdoc CI also builds with
   `RUSTDOCFLAGS="-D warnings"`.
 - `cargo test --doc` — run doctests alone when editing documentation examples.
@@ -162,11 +126,11 @@ Use standard `rustfmt` output and Rust 2024 idioms. Do not hand-format around
 
 ### Errors
 
-- One crate-wide `Error` enum per crate, in `src/error/mod.rs`, built with
-  `thiserror`.
-- Fallible public functions return `Result<T>`, the crate alias.
-- Add a specific variant instead of stuffing context into a string; error
-  messages are lowercase, without trailing punctuation.
+- Every port and driver returns `tinystoragedrivers_core::Result<T>` with a
+  `StorageError`. Callers branch on `ErrorKind`, so map a backend failure to the
+  kind a caller can act on, and keep the backend error as the source.
+- Error messages are lowercase, without trailing punctuation, and never contain
+  credentials.
 - Do not `unwrap()`, `expect()`, or `panic!` in library code paths. They are
   fine in tests, examples, and genuinely unreachable states — where `expect`
   must carry a message explaining the invariant.
@@ -185,8 +149,8 @@ add one:
 - gate anything optional behind a Cargo feature, documented in `Cargo.toml`;
 - declare it once in the root `[workspace.dependencies]` when more than one
   crate needs it, and take it with `{ workspace = true }`;
-- never add one to `crates/template-bus` that pulls in a transport, an async
-  runtime, an HTTP client, or a native library — CI fails the build if you do;
+- never add one to `crates/tinystoragedrivers-core` that pulls in a database
+  client or a transport. CI fails the build if you do;
 - leave a comment above the entry explaining *why* the crate is needed and what
   uses it — see the existing entries for the expected tone;
 - prefer well-maintained crates with a compatible license.
@@ -194,25 +158,10 @@ add one:
 Keep `Cargo.lock` committed; this workspace ships a single lockfile so CI and
 releases are reproducible.
 
-### Vendored dependencies
-
-TinyBus is registered as the `vendor/tinybus` git submodule and pinned by its
-gitlink. It supplies the host types and module-side SDK required to build this
-crate's `cdylib`. Initialize it after cloning with:
-
-```sh
-git submodule update --init --recursive
-```
-
-Do not edit vendored code from the parent repository. Make TinyBus changes in
-its own repository, push them there, then update this repository's gitlink in a
-separate commit. Keep the exact path dependencies and minimal features unless a
-new module capability requires more.
-
 ## Testing
 
-- Module-local unit tests live in `crates/<crate>/src/<feature>/test.rs` and may
-  touch private items.
+- Module-local unit tests live in `crates/<crate>/src/<feature>/mod_tests.rs` and
+  may touch private items.
 - Integration tests live in `crates/<crate>/tests/` and exercise only the public
   API — they are the regression suite for the crate's contract.
 - Payload types pin their serde representation in a unit test. That
@@ -240,7 +189,7 @@ Write documentation for the reader who has never seen the code.
 
 - Every public item gets a rustdoc comment. `missing_docs` is a warning that CI
   treats as an error.
-- Start every `mod.rs` and `test.rs` with a concise module-level `//!`
+- Start every `mod.rs` and `mod_tests.rs` with a concise module-level `//!`
   description.
 - Each crate's `src/lib.rs` carries its crate-level overview: what the crate
   does, the primary entry points, and a short runnable example. It should also
@@ -295,9 +244,8 @@ Releases run from `.github/workflows/release.yml` via a manual
 an interrupted release after its version commit and tag exist. The workflow
 re-runs the full validation suite, computes the next version, updates
 the root `[workspace.package]` version and `Cargo.lock`, commits and tags
-`vX.Y.Z`, builds `crates/template` as a TinyBus module for every supported
-platform, pushes, and creates an immutable GitHub release with installable
-native packages.
+`vX.Y.Z`, pushes, and creates a GitHub release. Consumers pin the tag through a
+git dependency or a submodule gitlink, so there are no binary assets.
 
 Consequently:
 
@@ -307,8 +255,7 @@ Consequently:
 - Follow semantic versioning. Any change to the public surface that is not
   purely additive is a breaking change and needs a major bump (pre-1.0: a minor
   bump).
-- The module must be packageable for every release target — `main` should
-  always be green.
+- `main` should always be green.
 
 ## Agent Working Agreement
 

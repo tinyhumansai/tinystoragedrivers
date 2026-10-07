@@ -7,11 +7,10 @@ this document is the short path through them.
 ## Development Setup
 
 Install a stable Rust toolchain with Rust 2024 support (see `rust-version` in
-`Cargo.toml` for the minimum supported version), initialize the vendored
-submodules, then run the four checks CI runs:
+`Cargo.toml` for the minimum supported version), then run the four checks CI
+runs:
 
 ```sh
-git submodule update --init --recursive
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --all-targets --all-features
@@ -25,18 +24,12 @@ installing `cargo-llvm-cov`, run the same gate locally:
 .github/scripts/check-file-coverage.sh 90 target/coverage.json
 ```
 
-The bundled example should also run:
-
-```sh
-cargo run --example basic
-```
-
 ## Making A Change
 
 1. Branch from `main` — never commit directly to it. If you use the `worktree`
    helper, work inside `worktrees/<slug>`.
 2. Put each feature area in its own module directory: `mod.rs` for the module
-   root and public surface, `types.rs` for substantial types, `test.rs` for
+   root and public surface, `types.rs` for substantial types, `mod_tests.rs` for
    module-local unit tests. Integration tests belong in `tests/`.
 3. Add a specific variant to the crate error type rather than encoding new
    failure context into a message string.

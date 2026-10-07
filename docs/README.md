@@ -28,10 +28,10 @@ docs/
 Complex modules also carry a module-level `README.md` inside `src/<module>/`
 covering their design, public surface, and important constraints.
 
-The current module-release contract is in
-[`specs/tinybus-module-release.md`](specs/tinybus-module-release.md), with its
-implementation sequence in
-[`plans/tinybus-module-release.md`](plans/tinybus-module-release.md).
+The storage ports and their guarantees are specified in
+[`specs/storage-ports.md`](specs/storage-ports.md); the order in which drivers
+land and consumers move onto them is
+[`plans/storage-rollout.md`](plans/storage-rollout.md).
 
 ## Conventions
 
