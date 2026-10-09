@@ -82,6 +82,14 @@ impl SqliteNative {
     ///
     /// [`ErrorKind::Backend`](tinystoragedrivers_core::ErrorKind::Backend)
     /// when the connection lock is poisoned.
+    ///
+    /// # Panics
+    ///
+    /// A panic in `f` is not caught: it unwinds out of this call on the
+    /// caller's thread, and because it happens while the connection lock is
+    /// held it poisons that lock, so every later call on this file in this
+    /// process (sync or async) fails with the error above. Keep `f` free of
+    /// panics, as with any code holding a shared lock.
     pub fn run_blocking<T>(&self, f: impl FnOnce(&Connection) -> T) -> Result<T> {
         self.db.run_now(|conn| Ok(f(conn)))
     }

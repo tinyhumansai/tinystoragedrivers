@@ -127,3 +127,15 @@ async fn sync_and_async_callers_see_each_others_writes() {
         .unwrap();
     assert_eq!(n, 7);
 }
+
+#[test]
+fn a_panic_in_a_sync_call_poisons_the_connection() {
+    let (_dir, native) = native();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        native.run_blocking(|_| panic!("owner bug")).ok();
+    }));
+    assert!(panicked.is_err(), "the panic reaches the caller");
+    let error = native.run_blocking(|_| ()).unwrap_err();
+    assert_eq!(error.kind(), tinystoragedrivers_core::ErrorKind::Backend);
+    assert!(error.message().contains("poisoned"), "{error}");
+}
