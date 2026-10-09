@@ -42,6 +42,9 @@ use immediate transactions. Other processes are serialized by WAL plus a
 `with_connection`, `with_transaction`, and `migrate`, where `migrate` is a
 per-owner, append-only migration runner. Owners such as a session ledger with
 its own FTS tables use it to keep their schema while sharing the connection.
+`run_blocking` runs a closure on that same connection on the calling thread,
+keeping the closure's own error type, for owners whose API is synchronous. It
+blocks, so call it from sync code or a blocking task, not on a runtime worker.
 
 ## rusqlite version
 
