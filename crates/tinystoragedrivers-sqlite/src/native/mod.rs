@@ -68,6 +68,24 @@ impl SqliteNative {
             .await
     }
 
+    /// Run `f` with the connection on the calling thread, for owners whose
+    /// API is synchronous (a session ledger called from sync turn code).
+    ///
+    /// It is the same shared connection [`Self::with_connection`] uses, so
+    /// sync and async callers on one file still queue on one lock. It blocks
+    /// the calling thread until the lock is free and `f` returns: call it
+    /// from sync code or a blocking task, never directly on an async
+    /// runtime worker. `f` keeps its own error type, so an owner can keep
+    /// its existing error handling; only lock poisoning is reported here.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Backend`](tinystoragedrivers_core::ErrorKind::Backend)
+    /// when the connection lock is poisoned.
+    pub fn run_blocking<T>(&self, f: impl FnOnce(&Connection) -> T) -> Result<T> {
+        self.db.run_now(|conn| Ok(f(conn)))
+    }
+
     /// Run `f` in an immediate transaction, committing when it succeeds.
     ///
     /// # Errors
