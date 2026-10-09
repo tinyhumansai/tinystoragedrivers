@@ -2014,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -2028,7 +2028,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-file"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -2052,7 +2052,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-mongodb"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-secrets"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chacha20poly1305",
@@ -2080,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "tinystoragedrivers-sqlite"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rusqlite",
  "serde_json",
