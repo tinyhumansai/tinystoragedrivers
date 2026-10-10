@@ -146,15 +146,19 @@ impl DocumentStore for MemoryDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
-        let now = self.now();
+        // The clock is read under the lock, where the guard check and the
+        // write are serialized.
         let mut state = self.db.lock()?;
+        let now = self.now();
         self.guard(&state, now)?;
         state.put(self.scope.as_str(), collection, id, doc, precondition, now)
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
-        let now = self.now();
+        // The clock is read under the lock, where the guard check and the
+        // write are serialized.
         let mut state = self.db.lock()?;
+        let now = self.now();
         self.guard(&state, now)?;
         state.delete(self.scope.as_str(), collection, id, precondition, now)
     }
@@ -181,8 +185,10 @@ impl DocumentStore for MemoryDocuments {
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
         validate_collection(collection)?;
         filter.validate()?;
-        let now = self.now();
+        // The clock is read under the lock, where the guard check and the
+        // write are serialized.
         let mut state = self.db.lock()?;
+        let now = self.now();
         self.guard(&state, now)?;
         Ok(state.delete_where(self.scope.as_str(), collection, filter, now))
     }
@@ -195,8 +201,10 @@ impl DocumentStore for MemoryDocuments {
         patch: &Value,
     ) -> Result<Option<Versioned<Value>>> {
         validate_doc(patch)?;
-        let now = self.now();
+        // The clock is read under the lock, where the guard check and the
+        // write are serialized.
         let mut state = self.db.lock()?;
+        let now = self.now();
         self.guard(&state, now)?;
         let Some(first) = self
             .matching(&state, collection, filter, sort)?
@@ -223,8 +231,10 @@ impl DocumentStore for MemoryDocuments {
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
-        let now = self.now();
+        // The clock is read under the lock, where the guard check and the
+        // write are serialized.
         let mut state = self.db.lock()?;
+        let now = self.now();
         self.guard(&state, now)?;
         // A batch only writes documents; copying the rest would cost time
         // proportional to every stored stream and blob.
