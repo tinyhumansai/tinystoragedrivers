@@ -266,3 +266,55 @@ async fn unfenced_stream_blob_and_drop_writes_never_read_the_clock() {
     scoped.documents().drop_collection("c").await.unwrap();
     assert_eq!(reads.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn fenced_document_writes_read_the_clock_under_the_database_lock() {
+    use std::sync::{OnceLock, TryLockError};
+
+    // The clock checks whether the database lock is held when it is read:
+    // the guard check and the write are serialized only under that lock.
+    let db: Arc<OnceLock<Arc<MemoryDb>>> = Arc::new(OnceLock::new());
+    let unlocked = Arc::new(AtomicU64::new(0));
+    let (seen_db, seen_unlocked) = (Arc::clone(&db), Arc::clone(&unlocked));
+    let storage = MemoryStorage::with_clock(Arc::new(move || {
+        if let Some(db) = seen_db.get()
+            && !matches!(db.state.try_lock(), Err(TryLockError::WouldBlock))
+        {
+            seen_unlocked.fetch_add(1, Ordering::SeqCst);
+        }
+        0
+    }));
+    db.set(Arc::clone(&storage.db)).ok();
+
+    storage
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .put("leases", "l", json!({"epoch": 1}), Precondition::None)
+        .await
+        .unwrap();
+    let fence = crate::Fence::epoch(Scope::local(), "leases", "l", "epoch", 1);
+    let docs = storage
+        .for_scope_fenced(&Scope::local(), &fence)
+        .unwrap()
+        .documents()
+        .clone();
+    unlocked.store(0, Ordering::SeqCst);
+
+    docs.put("c", "a", json!({"n": 1}), Precondition::None)
+        .await
+        .unwrap();
+    docs.claim("c", &Filter::All, &[], &json!({"n": 2}))
+        .await
+        .unwrap();
+    docs.atomic_batch(vec![crate::WriteOp::Delete {
+        collection: "c".into(),
+        id: "a".into(),
+        precondition: Precondition::None,
+    }])
+    .await
+    .unwrap();
+    docs.delete("c", "a", Precondition::None).await.unwrap();
+    docs.delete_where("c", &Filter::All).await.unwrap();
+    assert_eq!(unlocked.load(Ordering::SeqCst), 0);
+}
