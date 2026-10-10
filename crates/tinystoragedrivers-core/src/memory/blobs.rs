@@ -46,9 +46,13 @@ impl MemoryBlobs {
         }
     }
 
-    /// Refuse a write unless this handle's fence (if any) holds.
+    /// Refuse a write unless this handle's fence (if any) holds. An
+    /// unfenced handle never reads the clock.
     fn guard(&self, state: &DbState) -> Result<()> {
-        state.guard(self.fence.as_deref(), (self.clock)())
+        match self.fence.as_deref() {
+            None => Ok(()),
+            fence => state.guard(fence, (self.clock)()),
+        }
     }
 
     fn key(&self, key: &str) -> (String, String) {

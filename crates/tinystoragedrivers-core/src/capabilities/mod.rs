@@ -74,6 +74,13 @@ impl Capabilities {
     }
 
     /// Every capability this version of the crate defines.
+    ///
+    /// The set grows in later releases, so a backend should list the
+    /// capabilities it actually has rather than report `all()`. In
+    /// particular, a backend that reports [`Capability::Fencing`] must
+    /// implement (or forward)
+    /// [`StorageBackend::for_scope_fenced`](crate::StorageBackend::for_scope_fenced);
+    /// the trait's default refuses with `Unsupported(Fencing)`.
     #[must_use]
     pub const fn all() -> Self {
         Self(

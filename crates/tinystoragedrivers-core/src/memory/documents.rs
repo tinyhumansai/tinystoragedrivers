@@ -301,7 +301,11 @@ impl DocumentStore for MemoryDocuments {
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         validate_collection(collection)?;
         let mut state = self.db.lock()?;
-        self.guard(&state, self.now())?;
+        // Only a fenced handle reads the clock here: dropping a collection
+        // does not otherwise need it.
+        if self.fence.is_some() {
+            self.guard(&state, self.now())?;
+        }
         let key = (self.scope.as_str().to_owned(), collection.to_owned());
         let ids: Vec<String> = state
             .docs
