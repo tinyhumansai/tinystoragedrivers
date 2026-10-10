@@ -30,6 +30,7 @@ use tinystoragedrivers_core::{
 
 use crate::backend::Shared;
 use crate::errors;
+use crate::fence::unfenceable;
 use crate::naming::{BLOB_KEY_INDEX, BLOBS, SCOPE, prefix_regex};
 use crate::scoped::scoped_filter;
 
@@ -72,11 +73,26 @@ pub(crate) fn chunk_span(range: &Range<usize>, chunk_size: usize) -> (usize, usi
 pub(crate) struct MongoBlobs {
     shared: Arc<Shared>,
     scope: Scope,
+    /// Writes are refused: GridFS cannot join a fenced transaction.
+    fenced: bool,
 }
 
 impl MongoBlobs {
-    pub(crate) fn new(shared: Arc<Shared>, scope: Scope) -> Self {
-        Self { shared, scope }
+    pub(crate) fn new(shared: Arc<Shared>, scope: Scope, fenced: bool) -> Self {
+        Self {
+            shared,
+            scope,
+            fenced,
+        }
+    }
+
+    /// Refuse a write on a fenced handle rather than run it unfenced.
+    fn writable(&self, what: &str) -> Result<()> {
+        if self.fenced {
+            Err(unfenceable(what))
+        } else {
+            Ok(())
+        }
     }
 
     async fn bucket(&self) -> Result<GridFsBucket> {
@@ -209,6 +225,7 @@ impl MongoBlobs {
 impl BlobStore for MongoBlobs {
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
         validate_blob_key(key)?;
+        self.writable("a blob put")?;
         let bucket = self.bucket().await?;
         let mut upload = bucket
             .open_upload_stream(key)
@@ -284,6 +301,7 @@ impl BlobStore for MongoBlobs {
 
     async fn delete(&self, key: &str) -> Result<bool> {
         validate_blob_key(key)?;
+        self.writable("a blob delete")?;
         let bucket = self.bucket().await?;
         let ids: Vec<Bson> = self
             .files(&bucket, doc! {"filename": key})

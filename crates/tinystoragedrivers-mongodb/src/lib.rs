@@ -37,6 +37,9 @@
 //!   stemming or stop words.
 //! - **Transactions**: only on replica sets and sharded clusters, detected at
 //!   connect.
+//! - **Fencing**: with transactions only. Document and stream writes run in a
+//!   transaction that reads and touches the fence's guard document; blob
+//!   writes are refused, because GridFS cannot join a transaction.
 //!
 //! See the crate `README.md` for the storage layout and every place this
 //! driver's behavior is driver-defined.
@@ -49,6 +52,7 @@ mod blobs;
 mod convert;
 mod documents;
 mod errors;
+mod fence;
 mod naming;
 mod scoped;
 mod streams;

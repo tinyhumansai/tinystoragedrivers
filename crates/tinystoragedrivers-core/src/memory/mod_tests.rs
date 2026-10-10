@@ -205,3 +205,47 @@ fn an_exhausted_version_fails_the_write() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Backend);
 }
+
+#[test]
+fn fenced_handles_say_so_in_their_debug_output() {
+    let storage = MemoryStorage::new();
+    let fence = crate::Fence::epoch(Scope::local(), "leases", "l", "epoch", 1);
+    let fenced = storage.for_scope_fenced(&Scope::local(), &fence).unwrap();
+    for rendered in [
+        format!("{:?}", fenced.documents()),
+        format!("{:?}", fenced.streams()),
+        format!("{:?}", fenced.blobs()),
+    ] {
+        assert!(rendered.contains("fenced: true"), "{rendered}");
+    }
+    let plain = storage.for_scope(&Scope::local()).unwrap();
+    assert!(format!("{:?}", plain.streams()).contains("fenced: false"));
+}
+
+#[tokio::test]
+async fn a_guard_in_another_database_does_not_fence_this_one() {
+    use serde_json::json;
+    let storage = MemoryStorage::new();
+    storage
+        .database("leases")
+        .unwrap()
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .put(
+            "leases",
+            "l",
+            json!({"epoch": 1}),
+            crate::Precondition::None,
+        )
+        .await
+        .unwrap();
+    let fence = crate::Fence::epoch(Scope::local(), "leases", "l", "epoch", 1);
+    let fenced = storage.for_scope_fenced(&Scope::local(), &fence).unwrap();
+    let refused = fenced
+        .documents()
+        .put("notes", "n", json!({}), crate::Precondition::None)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.kind(), crate::ErrorKind::Fenced);
+}

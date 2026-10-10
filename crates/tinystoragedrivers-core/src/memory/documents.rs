@@ -15,6 +15,7 @@ use crate::document::{
     Versioned, WriteOp, WriteResult, validate_collection, validate_doc,
 };
 use crate::error::{Result, StorageError};
+use crate::fence::Fence;
 use crate::filter::{Filter, Sort, sort_documents};
 use crate::scope::Scope;
 use crate::value;
@@ -25,23 +26,41 @@ pub struct MemoryDocuments {
     db: Arc<MemoryDb>,
     scope: Scope,
     clock: Clock,
+    /// Checked under the lock before every write, when set.
+    fence: Option<Arc<Fence>>,
 }
 
 impl std::fmt::Debug for MemoryDocuments {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemoryDocuments")
             .field("scope", &self.scope)
+            .field("fenced", &self.fence.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl MemoryDocuments {
-    pub(super) fn new(db: Arc<MemoryDb>, scope: Scope, clock: Clock) -> Self {
-        Self { db, scope, clock }
+    pub(super) fn new(
+        db: Arc<MemoryDb>,
+        scope: Scope,
+        clock: Clock,
+        fence: Option<Arc<Fence>>,
+    ) -> Self {
+        Self {
+            db,
+            scope,
+            clock,
+            fence,
+        }
     }
 
     fn now(&self) -> u64 {
         (self.clock)()
+    }
+
+    /// Refuse a write unless this handle's fence (if any) holds.
+    fn guard(&self, state: &DbState, now_ms: u64) -> Result<()> {
+        state.guard(self.fence.as_deref(), now_ms)
     }
 
     fn matching(
@@ -129,12 +148,14 @@ impl DocumentStore for MemoryDocuments {
     ) -> Result<Version> {
         let now = self.now();
         let mut state = self.db.lock()?;
+        self.guard(&state, now)?;
         state.put(self.scope.as_str(), collection, id, doc, precondition, now)
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
         let now = self.now();
         let mut state = self.db.lock()?;
+        self.guard(&state, now)?;
         state.delete(self.scope.as_str(), collection, id, precondition, now)
     }
 
@@ -162,6 +183,7 @@ impl DocumentStore for MemoryDocuments {
         filter.validate()?;
         let now = self.now();
         let mut state = self.db.lock()?;
+        self.guard(&state, now)?;
         Ok(state.delete_where(self.scope.as_str(), collection, filter, now))
     }
 
@@ -175,6 +197,7 @@ impl DocumentStore for MemoryDocuments {
         validate_doc(patch)?;
         let now = self.now();
         let mut state = self.db.lock()?;
+        self.guard(&state, now)?;
         let Some(first) = self
             .matching(&state, collection, filter, sort)?
             .into_iter()
@@ -202,6 +225,7 @@ impl DocumentStore for MemoryDocuments {
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
         let now = self.now();
         let mut state = self.db.lock()?;
+        self.guard(&state, now)?;
         // A batch only writes documents; copying the rest would cost time
         // proportional to every stored stream and blob.
         let mut draft = DbState {
@@ -277,6 +301,7 @@ impl DocumentStore for MemoryDocuments {
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         validate_collection(collection)?;
         let mut state = self.db.lock()?;
+        self.guard(&state, self.now())?;
         let key = (self.scope.as_str().to_owned(), collection.to_owned());
         let ids: Vec<String> = state
             .docs

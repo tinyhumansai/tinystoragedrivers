@@ -24,16 +24,21 @@ pub enum Capability {
     /// Documents expire on their collection's
     /// [`ttl_field`](crate::CollectionSpec::ttl_field).
     Ttl,
+    /// [`StorageBackend::for_scope_fenced`](crate::StorageBackend::for_scope_fenced):
+    /// handles whose writes the driver checks against a
+    /// [`Fence`](crate::Fence) in the same atomic step.
+    Fencing,
 }
 
 impl Capability {
-    const ALL: [Self; 3] = [Self::FullText, Self::Transactions, Self::Ttl];
+    const ALL: [Self; 4] = [Self::FullText, Self::Transactions, Self::Ttl, Self::Fencing];
 
     const fn bit(self) -> u32 {
         match self {
             Self::FullText => 1,
             Self::Transactions => 1 << 1,
             Self::Ttl => 1 << 2,
+            Self::Fencing => 1 << 3,
         }
     }
 }
@@ -44,6 +49,7 @@ impl fmt::Display for Capability {
             Self::FullText => "full_text",
             Self::Transactions => "transactions",
             Self::Ttl => "ttl",
+            Self::Fencing => "fencing",
         })
     }
 }
@@ -70,7 +76,12 @@ impl Capabilities {
     /// Every capability this version of the crate defines.
     #[must_use]
     pub const fn all() -> Self {
-        Self(Capability::FullText.bit() | Capability::Transactions.bit() | Capability::Ttl.bit())
+        Self(
+            Capability::FullText.bit()
+                | Capability::Transactions.bit()
+                | Capability::Ttl.bit()
+                | Capability::Fencing.bit(),
+        )
     }
 
     /// This set plus `capability`.

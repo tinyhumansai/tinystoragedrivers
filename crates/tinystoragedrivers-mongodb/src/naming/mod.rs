@@ -32,6 +32,10 @@ pub(crate) const BODY: &str = "d";
 /// `_v` so a recreated id continues its version sequence, and its body is
 /// emptied so no index or text search sees it.
 pub(crate) const DELETED: &str = "_del";
+/// A counter on a fence's guard document that every fenced transaction
+/// increments, so a concurrent takeover of the guard conflicts with it. Reads
+/// ignore it, and the next ordinary write of the guard replaces it.
+pub(crate) const FENCE: &str = "_fence";
 
 /// Driver metadata: one document per declared collection.
 pub(crate) const META: &str = "_tsd_meta";

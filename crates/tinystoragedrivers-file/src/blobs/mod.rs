@@ -17,9 +17,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tinystoragedrivers_core::{
-    Blob, BlobMeta, BlobStore, Result, Scope, StorageError, clamp_range, validate_blob_key,
+    Blob, BlobMeta, BlobStore, Fence, Result, Scope, StorageError, clamp_range, validate_blob_key,
 };
 
+use crate::documents::guard;
 use crate::encode::file_stem;
 use crate::fsio::{
     files_with_suffix, io_error, open_read, read_json, read_optional, remove_optional,
@@ -42,6 +43,8 @@ struct Sidecar {
 pub struct FileBlobs {
     db: Arc<Db>,
     scope: Scope,
+    /// Checked under the database lock before every write, when set.
+    fence: Option<Arc<Fence>>,
 }
 
 /// The paths of one blob.
@@ -51,8 +54,8 @@ struct Paths {
 }
 
 impl FileBlobs {
-    pub(crate) fn new(db: Arc<Db>, scope: Scope) -> Self {
-        Self { db, scope }
+    pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fence>>) -> Self {
+        Self { db, scope, fence }
     }
 
     fn dir(db: &Db, scope: &Scope) -> PathBuf {
@@ -65,10 +68,29 @@ impl FileBlobs {
         T: Send + 'static,
         F: FnOnce(&Paths, &str) -> Result<T> + Send + 'static,
     {
+        self.run(key, None, work).await
+    }
+
+    /// [`Self::with`] for a write: the fence (if any) is checked first,
+    /// under the same lock.
+    async fn write<T, F>(&self, key: &str, work: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Paths, &str) -> Result<T> + Send + 'static,
+    {
+        self.run(key, self.fence.clone(), work).await
+    }
+
+    async fn run<T, F>(&self, key: &str, fence: Option<Arc<Fence>>, work: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Paths, &str) -> Result<T> + Send + 'static,
+    {
         validate_blob_key(key)?;
         let (scope, key) = (self.scope.clone(), key.to_owned());
         self.db
             .run(move |db| {
+                guard(db, fence.as_deref())?;
                 let dir = Self::dir(db, &scope);
                 let stem = file_stem(&key);
                 let paths = Paths {
@@ -120,7 +142,7 @@ fn collision() -> StorageError {
 impl BlobStore for FileBlobs {
     async fn put(&self, key: &str, bytes: Vec<u8>, content_type: Option<&str>) -> Result<BlobMeta> {
         let content_type = content_type.map(str::to_owned);
-        self.with(key, move |paths, key| {
+        self.write(key, move |paths, key| {
             if let Some(existing) = read_json::<Sidecar>(&paths.meta)?
                 && existing.key != key
             {
@@ -182,7 +204,7 @@ impl BlobStore for FileBlobs {
     }
 
     async fn delete(&self, key: &str) -> Result<bool> {
-        self.with(key, |paths, key| {
+        self.write(key, |paths, key| {
             if head(paths, key)?.is_none() {
                 return Ok(false);
             }

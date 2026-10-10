@@ -16,6 +16,7 @@ use crate::document::{
     validate_id,
 };
 use crate::error::{Result, StorageError};
+use crate::fence::Fence;
 use crate::filter::Filter;
 use crate::value;
 
@@ -112,6 +113,23 @@ impl DbState {
                 version: stored.version,
                 doc: stored.doc.clone(),
             })
+    }
+
+    /// Refuse a fenced handle's write unless its fence holds now. Called
+    /// under the database lock, so the check and the write are one step.
+    pub(super) fn guard(&self, fence: Option<&Fence>, now_ms: u64) -> Result<()> {
+        match fence {
+            None => Ok(()),
+            Some(fence) => fence.check(
+                self.get(
+                    fence.scope().as_str(),
+                    fence.collection(),
+                    fence.id(),
+                    now_ms,
+                )
+                .as_ref(),
+            ),
+        }
     }
 
     pub(super) fn put(

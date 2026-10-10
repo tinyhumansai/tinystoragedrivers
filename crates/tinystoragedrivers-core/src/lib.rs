@@ -16,7 +16,9 @@
 //!
 //! A [`StorageBackend`] hands out a [`ScopedStorage`] per [`Scope`], the
 //! tenant key every record carries, and splits into named databases with
-//! [`StorageBackend::database`].
+//! [`StorageBackend::database`]. [`StorageBackend::for_scope_fenced`] hands
+//! out handles whose writes the driver checks atomically against a [`Fence`]
+//! (a lease epoch), so a node that lost its lease cannot land a late write.
 //!
 //! # Example
 //!
@@ -53,6 +55,7 @@ mod blob;
 mod capabilities;
 mod document;
 mod error;
+mod fence;
 mod filter;
 mod memory;
 mod scope;
@@ -75,6 +78,7 @@ pub use document::{
     Versioned, WriteOp, WriteResult, validate_collection, validate_doc, validate_id,
 };
 pub use error::{ErrorKind, Result, StorageError};
+pub use fence::Fence;
 pub use filter::{Direction, Filter, ID_FIELD, Sort, sort_documents};
 pub use memory::{Clock, MemoryBlobs, MemoryDocuments, MemoryStorage, MemoryStreams};
 pub use scope::{MAX_SCOPE_LEN, Scope};

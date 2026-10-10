@@ -1,4 +1,5 @@
-//! [`StreamStore`] on MongoDB, with dense offsets and no transactions.
+//! [`StreamStore`] on MongoDB, with dense offsets and no transactions (a
+//! fenced handle runs each write in one, see [`crate::fence`]).
 //!
 //! A stream is a run of *segments* in `<prefix>_tsd_streams`, one per append:
 //! `{_scope, s, o, n, e, t, vs}` covers offsets `o..e` (`e = o + n`), of which
@@ -31,17 +32,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use mongodb::IndexModel;
 use mongodb::bson::{Bson, Document, doc};
 use mongodb::options::{FindOptions, IndexOptions};
+use mongodb::{ClientSession, IndexModel};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
+    Fence, Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
 };
 
 use crate::backend::Shared;
 use crate::convert::{from_bson, to_bson};
 use crate::errors;
+use crate::fence::in_fence;
 use crate::naming::{
     SCOPE, STREAM_END_INDEX, STREAM_HEADS, STREAM_SEGMENT_INDEX, STREAMS, prefix_regex,
 };
@@ -169,11 +171,17 @@ pub(crate) fn head_id(scope: &Scope, stream: &str) -> Document {
 pub(crate) struct MongoStreams {
     shared: Arc<Shared>,
     scope: Scope,
+    /// Every write runs in a transaction that holds this fence, when set.
+    fence: Option<Arc<Fence>>,
 }
 
 impl MongoStreams {
-    pub(crate) fn new(shared: Arc<Shared>, scope: Scope) -> Self {
-        Self { shared, scope }
+    pub(crate) fn new(shared: Arc<Shared>, scope: Scope, fence: Option<Arc<Fence>>) -> Self {
+        Self {
+            shared,
+            scope,
+            fence,
+        }
     }
 
     async fn segments(&self) -> Result<ScopedCollection> {
@@ -186,10 +194,10 @@ impl MongoStreams {
     }
 
     /// The current generation of `stream`.
-    async fn generation(&self, stream: &str) -> Result<i64> {
+    async fn generation(&self, stream: &str, session: Option<&mut ClientSession>) -> Result<i64> {
         let head = self
             .heads()
-            .find_one(doc! {"_id": head_id(&self.scope, stream)}, None)
+            .find_one(doc! {"_id": head_id(&self.scope, stream)}, session)
             .await
             .map_err(errors::failed("read a stream header"))?;
         Ok(head.map_or(0, |head| head.get_i64("g").unwrap_or(0)))
@@ -203,18 +211,139 @@ impl MongoStreams {
         stream: &str,
         generation: i64,
         order: i32,
+        session: Option<&mut ClientSession>,
     ) -> Result<Option<Segment>> {
         let found = handle
-            .find(
+            .find_in(
                 doc! {"s": stream, "g": generation},
                 FindOptions::builder()
                     .sort(doc! {"o": order})
                     .limit(1)
                     .build(),
+                session,
             )
             .await
             .map_err(errors::failed("read a stream"))?;
         found.first().map(Segment::decode).transpose()
+    }
+
+    /// One append attempt at the stream's current end. `None` when another
+    /// appender took that offset first.
+    async fn append_once(
+        &self,
+        handle: &ScopedCollection,
+        stream: &str,
+        values: &[Value],
+        mut session: Option<&mut ClientSession>,
+    ) -> Result<Option<u64>> {
+        let generation = self.generation(stream, session.as_deref_mut()).await?;
+        let end = self
+            .edge(handle, stream, generation, -1, session.as_deref_mut())
+            .await?
+            .map_or(0, |last| last.end);
+        if values.is_empty() {
+            return Ok(Some(end));
+        }
+        match handle
+            .insert_one(new_segment(stream, generation, end, values)?, session)
+            .await
+        {
+            Ok(()) => Ok(Some(end)),
+            Err(error)
+                if errors::duplicate_index(&error).as_deref() == Some(STREAM_SEGMENT_INDEX) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(errors::map(error, "append to a stream")),
+        }
+    }
+
+    async fn truncate_in(
+        &self,
+        handle: &ScopedCollection,
+        stream: &str,
+        offset: u64,
+        mut session: Option<&mut ClientSession>,
+    ) -> Result<u64> {
+        let generation = self.generation(stream, session.as_deref_mut()).await?;
+        let Some(last) = self
+            .edge(handle, stream, generation, -1, session.as_deref_mut())
+            .await?
+        else {
+            return Ok(0);
+        };
+        let affected = handle
+            .find_in(
+                doc! {"s": stream, "g": generation, "o": {"$lt": stored_offset(offset).unwrap_or(i64::MAX)}},
+                FindOptions::builder().sort(doc! {"o": 1}).build(),
+                session.as_deref_mut(),
+            )
+            .await
+            .map_err(errors::failed("read a stream"))?;
+        let segments: Vec<Segment> = affected
+            .iter()
+            .map(Segment::decode)
+            .collect::<Result<_>>()?;
+        // The first retained offset: past every fully trimmed segment.
+        let base = segments
+            .iter()
+            .find(|segment| segment.start + segment.trimmed < segment.end)
+            .map_or_else(
+                || {
+                    segments
+                        .last()
+                        .map_or(last.end, |segment| segment.end.min(last.end))
+                },
+                |segment| segment.start + segment.trimmed,
+            );
+        let cut = offset.clamp(base, last.end);
+        for segment in &segments {
+            let keep_from = cut.clamp(segment.start, segment.end) - segment.start;
+            if segment.end <= cut && segment.start != last.start {
+                handle
+                    .delete_many(doc! {"_id": segment.id.clone()}, session.as_deref_mut())
+                    .await
+                    .map_err(errors::failed("truncate a stream"))?;
+            } else if keep_from > segment.trimmed {
+                let drop = usize::try_from(keep_from - segment.trimmed).unwrap_or(usize::MAX);
+                let rest: Vec<Bson> = segment.values.iter().skip(drop).cloned().collect();
+                handle
+                    .update_one(
+                        doc! {"_id": segment.id.clone(), "t": stored_offset(segment.trimmed)?},
+                        doc! {"$set": {"t": stored_offset(keep_from)?, "vs": rest}},
+                        false,
+                        session.as_deref_mut(),
+                    )
+                    .await
+                    .map_err(errors::failed("truncate a stream"))?;
+            }
+        }
+        Ok(cut - base)
+    }
+
+    async fn delete_in(
+        &self,
+        handle: &ScopedCollection,
+        stream: &str,
+        mut session: Option<&mut ClientSession>,
+    ) -> Result<bool> {
+        let current = self.generation(stream, session.as_deref_mut()).await?;
+        // Advance first: from here on every reader ignores the old segments,
+        // and an append still holding the old generation lands among them.
+        self.heads()
+            .update_one(
+                doc! {"_id": head_id(&self.scope, stream), "n": stream},
+                doc! {"$inc": {"g": 1_i64}},
+                true,
+                session.as_deref_mut(),
+            )
+            .await
+            .map_err(errors::failed("delete a stream"))?;
+        let removed = handle
+            .delete_many(doc! {"s": stream, "g": {"$lte": current}}, session)
+            .await
+            .map_err(errors::failed("delete a stream"))?;
+        Ok(removed > 0)
     }
 }
 
@@ -227,24 +356,22 @@ impl StreamStore for MongoStreams {
     async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64> {
         validate_stream(stream)?;
         let handle = self.segments().await?;
+        if let Some(fence) = &self.fence {
+            // A lost race aborts the transaction (a duplicate key ends it),
+            // so it is retried as a transient failure.
+            return in_fence!(&self.shared, fence, session => {
+                self.append_once(&handle, stream, &values, Some(session))
+                    .await
+                    .and_then(|end| {
+                        end.ok_or_else(|| {
+                            StorageError::unavailable("stream grew concurrently; retry")
+                        })
+                    })
+            });
+        }
         for _ in 0..APPEND_ATTEMPTS {
-            let generation = self.generation(stream).await?;
-            let end = self
-                .edge(&handle, stream, generation, -1)
-                .await?
-                .map_or(0, |last| last.end);
-            if values.is_empty() {
+            if let Some(end) = self.append_once(&handle, stream, &values, None).await? {
                 return Ok(end);
-            }
-            match handle
-                .insert_one(new_segment(stream, generation, end, &values)?, None)
-                .await
-            {
-                Ok(()) => return Ok(end),
-                Err(error)
-                    if errors::duplicate_index(&error).as_deref() == Some(STREAM_SEGMENT_INDEX) => {
-                }
-                Err(error) => return Err(errors::map(error, "append to a stream")),
             }
         }
         Err(StorageError::unavailable(
@@ -258,7 +385,7 @@ impl StreamStore for MongoStreams {
             return Ok(Vec::new());
         }
         let handle = self.segments().await?;
-        let generation = self.generation(stream).await?;
+        let generation = self.generation(stream, None).await?;
         let mut cursor = handle
             .cursor(
                 doc! {"s": stream, "g": generation, "e": {"$gt": stored_offset(from).unwrap_or(i64::MAX)}},
@@ -288,9 +415,9 @@ impl StreamStore for MongoStreams {
     async fn len(&self, stream: &str) -> Result<u64> {
         validate_stream(stream)?;
         let handle = self.segments().await?;
-        let generation = self.generation(stream).await?;
+        let generation = self.generation(stream, None).await?;
         Ok(self
-            .edge(&handle, stream, generation, -1)
+            .edge(&handle, stream, generation, -1, None)
             .await?
             .map_or(0, |last| last.end))
     }
@@ -298,78 +425,23 @@ impl StreamStore for MongoStreams {
     async fn truncate_before(&self, stream: &str, offset: u64) -> Result<u64> {
         validate_stream(stream)?;
         let handle = self.segments().await?;
-        let generation = self.generation(stream).await?;
-        let Some(last) = self.edge(&handle, stream, generation, -1).await? else {
-            return Ok(0);
-        };
-        let affected = handle
-            .find(
-                doc! {"s": stream, "g": generation, "o": {"$lt": stored_offset(offset).unwrap_or(i64::MAX)}},
-                FindOptions::builder().sort(doc! {"o": 1}).build(),
-            )
-            .await
-            .map_err(errors::failed("read a stream"))?;
-        let segments: Vec<Segment> = affected
-            .iter()
-            .map(Segment::decode)
-            .collect::<Result<_>>()?;
-        // The first retained offset: past every fully trimmed segment.
-        let base = segments
-            .iter()
-            .find(|segment| segment.start + segment.trimmed < segment.end)
-            .map_or_else(
-                || {
-                    segments
-                        .last()
-                        .map_or(last.end, |segment| segment.end.min(last.end))
-                },
-                |segment| segment.start + segment.trimmed,
-            );
-        let cut = offset.clamp(base, last.end);
-        for segment in &segments {
-            let keep_from = cut.clamp(segment.start, segment.end) - segment.start;
-            if segment.end <= cut && segment.start != last.start {
-                handle
-                    .delete_many(doc! {"_id": segment.id.clone()}, None)
-                    .await
-                    .map_err(errors::failed("truncate a stream"))?;
-            } else if keep_from > segment.trimmed {
-                let drop = usize::try_from(keep_from - segment.trimmed).unwrap_or(usize::MAX);
-                let rest: Vec<Bson> = segment.values.iter().skip(drop).cloned().collect();
-                handle
-                    .update_one(
-                        doc! {"_id": segment.id.clone(), "t": stored_offset(segment.trimmed)?},
-                        doc! {"$set": {"t": stored_offset(keep_from)?, "vs": rest}},
-                        false,
-                        None,
-                    )
-                    .await
-                    .map_err(errors::failed("truncate a stream"))?;
-            }
+        match &self.fence {
+            None => self.truncate_in(&handle, stream, offset, None).await,
+            Some(fence) => in_fence!(&self.shared, fence, session => {
+                self.truncate_in(&handle, stream, offset, Some(session)).await
+            }),
         }
-        Ok(cut - base)
     }
 
     async fn delete_stream(&self, stream: &str) -> Result<bool> {
         validate_stream(stream)?;
         let handle = self.segments().await?;
-        let current = self.generation(stream).await?;
-        // Advance first: from here on every reader ignores the old segments,
-        // and an append still holding the old generation lands among them.
-        self.heads()
-            .update_one(
-                doc! {"_id": head_id(&self.scope, stream), "n": stream},
-                doc! {"$inc": {"g": 1_i64}},
-                true,
-                None,
-            )
-            .await
-            .map_err(errors::failed("delete a stream"))?;
-        let removed = handle
-            .delete_many(doc! {"s": stream, "g": {"$lte": current}}, None)
-            .await
-            .map_err(errors::failed("delete a stream"))?;
-        Ok(removed > 0)
+        match &self.fence {
+            None => self.delete_in(&handle, stream, None).await,
+            Some(fence) => in_fence!(&self.shared, fence, session => {
+                self.delete_in(&handle, stream, Some(session)).await
+            }),
+        }
     }
 
     async fn streams(&self, prefix: &str) -> Result<Vec<String>> {

@@ -1,7 +1,9 @@
 //! The in-memory driver: the reference implementation of every port.
 //!
-//! It provides every [`Capability`](crate::Capability), keeps nothing across
-//! process restarts, and is what tests and stateless embedders run on. Because
+//! It provides every [`Capability`](crate::Capability), including
+//! [`Fencing`](crate::Capability::Fencing) on every write (the fence is
+//! checked under the same lock as the write), keeps nothing across process
+//! restarts, and is what tests and stateless embedders run on. Because
 //! its semantics are the simplest correct reading of the port docs, the
 //! conformance suite is written against it first and every other driver must
 //! agree with it.
@@ -19,6 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::backend::{ScopedStorage, StorageBackend, validate_database};
 use crate::capabilities::Capabilities;
 use crate::error::{Result, StorageError};
+use crate::fence::Fence;
 use crate::scope::Scope;
 
 pub use blobs::MemoryBlobs;
@@ -86,6 +89,31 @@ impl MemoryStorage {
             clock,
         }
     }
+
+    fn handles(&self, scope: &Scope, fence: Option<&Arc<Fence>>) -> ScopedStorage {
+        ScopedStorage::new(
+            scope.clone(),
+            self.driver(),
+            Arc::new(MemoryDocuments::new(
+                Arc::clone(&self.db),
+                scope.clone(),
+                Arc::clone(&self.clock),
+                fence.cloned(),
+            )),
+            Arc::new(MemoryStreams::new(
+                Arc::clone(&self.db),
+                scope.clone(),
+                Arc::clone(&self.clock),
+                fence.cloned(),
+            )),
+            Arc::new(MemoryBlobs::new(
+                Arc::clone(&self.db),
+                scope.clone(),
+                Arc::clone(&self.clock),
+                fence.cloned(),
+            )),
+        )
+    }
 }
 
 impl Default for MemoryStorage {
@@ -110,17 +138,12 @@ impl StorageBackend for MemoryStorage {
     }
 
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
-        Ok(ScopedStorage::new(
-            scope.clone(),
-            self.driver(),
-            Arc::new(MemoryDocuments::new(
-                Arc::clone(&self.db),
-                scope.clone(),
-                Arc::clone(&self.clock),
-            )),
-            Arc::new(MemoryStreams::new(Arc::clone(&self.db), scope.clone())),
-            Arc::new(MemoryBlobs::new(Arc::clone(&self.db), scope.clone())),
-        ))
+        Ok(self.handles(scope, None))
+    }
+
+    fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
+        fence.validate()?;
+        Ok(self.handles(scope, Some(&Arc::new(fence.clone()))))
     }
 
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {

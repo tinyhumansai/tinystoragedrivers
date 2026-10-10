@@ -3,7 +3,9 @@
 //! [`SqliteStorage`] implements the document, stream and blob ports on
 //! generic tables, with every [`Capability`](tinystoragedrivers_core::Capability):
 //! expiry, transactions (`atomic_batch` in one immediate transaction) and
-//! full-text search (FTS5). It passes the shared conformance suite.
+//! full-text search (FTS5) and fencing (the guard document is read in the
+//! write's own immediate transaction). It passes the shared conformance
+//! suite.
 //!
 //! [`SqliteNative`] gives owners that keep their own relational schema raw
 //! access to the same file and connection, with a migration runner, so a
@@ -32,6 +34,7 @@ mod blobs;
 mod connection;
 mod documents;
 mod error;
+mod fence;
 mod native;
 mod sql;
 mod storage;

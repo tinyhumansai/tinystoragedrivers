@@ -20,5 +20,6 @@ After the specification is accepted, create a linked implementation plan in
 [`../plans/`](../plans/README.md). Keep code snippets small enough to clarify
 the contract; production code still belongs under `src/`.
 
-See [`storage-ports.md`](storage-ports.md) and
-[`secret-storage.md`](secret-storage.md).
+See [`storage-ports.md`](storage-ports.md),
+[`secret-storage.md`](secret-storage.md) and
+[`write-fencing.md`](write-fencing.md).

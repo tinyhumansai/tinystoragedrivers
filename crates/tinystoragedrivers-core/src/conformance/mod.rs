@@ -18,6 +18,7 @@
 
 mod blobs;
 mod documents;
+mod fencing;
 mod isolation;
 mod streams;
 
@@ -57,6 +58,7 @@ pub async fn run(backend: &dyn StorageBackend, single_scope: bool) {
         isolation::run(backend).await;
     }
     isolation::databases(backend).await;
+    fencing::run(backend, single_scope).await;
 }
 
 /// A name unique to this process and call, safe as a collection, stream or

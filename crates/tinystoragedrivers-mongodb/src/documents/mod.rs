@@ -26,13 +26,14 @@ use async_trait::async_trait;
 use mongodb::ClientSession;
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capabilities, Capability, CollectionSpec, DocumentStore, ErrorKind, Filter, Page, Precondition,
-    Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp, WriteResult,
-    validate_collection, validate_doc, validate_id, value,
+    Capabilities, Capability, CollectionSpec, DocumentStore, ErrorKind, Fence, Filter, Page,
+    Precondition, Query, Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, WriteOp,
+    WriteResult, validate_collection, validate_doc, validate_id, value,
 };
 
 use crate::backend::{Shared, specs::scope_key_model};
 use crate::errors;
+use crate::fence::in_fence;
 use crate::naming::{decode_cursor, encode_cursor};
 use crate::scoped::ScopedCollection;
 
@@ -72,19 +73,66 @@ pub(crate) fn commit_failure(error: &mongodb::error::Error) -> CommitFailure {
 pub(crate) struct MongoDocuments {
     shared: Arc<Shared>,
     scope: Scope,
+    /// Every write runs in a transaction that holds this fence, when set.
+    fence: Option<Arc<Fence>>,
 }
 
 impl std::fmt::Debug for MongoDocuments {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MongoDocuments")
             .field("scope", &self.scope)
+            .field("fenced", &self.fence.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl MongoDocuments {
-    pub(crate) fn new(shared: Arc<Shared>, scope: Scope) -> Self {
-        Self { shared, scope }
+    pub(crate) fn new(shared: Arc<Shared>, scope: Scope, fence: Option<Arc<Fence>>) -> Self {
+        Self {
+            shared,
+            scope,
+            fence,
+        }
+    }
+
+    /// Validate `collection` and do what cannot run inside a transaction
+    /// (index builds, loading the declaration) before a fenced write.
+    async fn ready(&self, collection: &str) -> Result<()> {
+        validate_collection(collection)?;
+        self.prepare(collection).await?;
+        self.shared.spec(collection).await?;
+        Ok(())
+    }
+
+    /// One claim attempt: pick the first match and compare-and-swap it.
+    async fn claim_once(
+        &self,
+        collection: &str,
+        filter: &Filter,
+        sort: &[Sort],
+        patch: &Value,
+        session: Option<&mut ClientSession>,
+    ) -> Result<Option<Versioned<Value>>> {
+        let (first, _) = self.page(collection, filter, sort, 0, Some(1)).await?;
+        let Some(first) = first.into_iter().next() else {
+            return Ok(None);
+        };
+        let mut doc = first.doc;
+        value::merge_patch(&mut doc, patch);
+        let version = self
+            .put_one(
+                collection,
+                &first.id,
+                &doc,
+                Precondition::Version(first.version),
+                session,
+            )
+            .await?;
+        Ok(Some(Versioned {
+            id: first.id,
+            version,
+            doc,
+        }))
     }
 
     fn collection(&self, collection: &str) -> ScopedCollection {
@@ -130,7 +178,9 @@ impl MongoDocuments {
     }
 
     /// Commit, retrying a commit whose outcome the server could not report.
-    async fn commit(session: &mut ClientSession) -> std::result::Result<(), mongodb::error::Error> {
+    pub(crate) async fn commit(
+        session: &mut ClientSession,
+    ) -> std::result::Result<(), mongodb::error::Error> {
         let mut outcome = session.commit_transaction().await;
         for _ in 0..TRANSACTION_ATTEMPTS {
             match &outcome {
@@ -152,6 +202,7 @@ impl DocumentStore for MongoDocuments {
             .with(Capability::Ttl);
         if self.shared.transactions {
             base.with(Capability::Transactions)
+                .with(Capability::Fencing)
         } else {
             base
         }
@@ -180,11 +231,23 @@ impl DocumentStore for MongoDocuments {
         doc: Value,
         precondition: Precondition,
     ) -> Result<Version> {
-        self.put_one(collection, id, &doc, precondition, None).await
+        let Some(fence) = &self.fence else {
+            return self.put_one(collection, id, &doc, precondition, None).await;
+        };
+        self.ready(collection).await?;
+        in_fence!(&self.shared, fence, session => {
+            self.put_one(collection, id, &doc, precondition, Some(session)).await
+        })
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
-        self.delete_one(collection, id, precondition, None).await
+        let Some(fence) = &self.fence else {
+            return self.delete_one(collection, id, precondition, None).await;
+        };
+        self.ready(collection).await?;
+        in_fence!(&self.shared, fence, session => {
+            self.delete_one(collection, id, precondition, Some(session)).await
+        })
     }
 
     async fn query(&self, collection: &str, query: &Query) -> Result<Page<Versioned<Value>>> {
@@ -207,8 +270,17 @@ impl DocumentStore for MongoDocuments {
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
         validate_collection(collection)?;
         filter.validate()?;
-        let pairs = self.live_pairs(collection, filter).await?;
-        self.remove(collection, &pairs, None).await
+        let Some(fence) = &self.fence else {
+            let pairs = self.live_pairs(collection, filter).await?;
+            return self.remove(collection, &pairs, None).await;
+        };
+        self.ready(collection).await?;
+        in_fence!(&self.shared, fence, session => {
+            match self.live_pairs(collection, filter).await {
+                Ok(pairs) => self.remove(collection, &pairs, Some(session)).await,
+                Err(error) => Err(error),
+            }
+        })
     }
 
     async fn claim(
@@ -221,30 +293,27 @@ impl DocumentStore for MongoDocuments {
         validate_doc(patch)?;
         validate_collection(collection)?;
         filter.validate()?;
+        if self.fence.is_some() {
+            self.ready(collection).await?;
+        }
         for _ in 0..CLAIM_ATTEMPTS {
-            let (first, _) = self.page(collection, filter, sort, 0, Some(1)).await?;
-            let Some(first) = first.into_iter().next() else {
-                return Ok(None);
+            let outcome = match &self.fence {
+                None => self.claim_once(collection, filter, sort, patch, None).await,
+                // A lost compare-and-swap commits nothing but the fence hold
+                // and comes back as `None`, so the claim retries rather than
+                // failing out of the fenced transaction.
+                Some(fence) => in_fence!(&self.shared, fence, session => {
+                    match self.claim_once(collection, filter, sort, patch, Some(session)).await {
+                        Err(error) if error.kind() == ErrorKind::Conflict => Ok(None),
+                        other => other.map(Some),
+                    }
+                })
+                .and_then(|step| {
+                    step.ok_or_else(|| StorageError::conflict("claim lost to a concurrent claimer"))
+                }),
             };
-            let mut doc = first.doc;
-            value::merge_patch(&mut doc, patch);
-            match self
-                .put_one(
-                    collection,
-                    &first.id,
-                    &doc,
-                    Precondition::Version(first.version),
-                    None,
-                )
-                .await
-            {
-                Ok(version) => {
-                    return Ok(Some(Versioned {
-                        id: first.id,
-                        version,
-                        doc,
-                    }));
-                }
+            match outcome {
+                Ok(claimed) => return Ok(claimed),
                 Err(error) if error.kind() == ErrorKind::Conflict => {}
                 Err(error) => return Err(error),
             }
@@ -255,6 +324,15 @@ impl DocumentStore for MongoDocuments {
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
+        if let Some(fence) = &self.fence {
+            for op in &ops {
+                let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
+                self.ready(collection).await?;
+            }
+            return in_fence!(&self.shared, fence, session => {
+                self.run_batch(&ops, session).await
+            });
+        }
         if !self.shared.transactions {
             return Err(StorageError::unsupported(
                 Capability::Transactions,
@@ -318,8 +396,18 @@ impl DocumentStore for MongoDocuments {
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         validate_collection(collection)?;
-        let pairs = self.matching_pairs(collection, &Filter::All).await?;
-        self.remove(collection, &pairs, None).await?;
+        let Some(fence) = &self.fence else {
+            let pairs = self.matching_pairs(collection, &Filter::All).await?;
+            self.remove(collection, &pairs, None).await?;
+            return Ok(());
+        };
+        self.ready(collection).await?;
+        in_fence!(&self.shared, fence, session => {
+            match self.matching_pairs(collection, &Filter::All).await {
+                Ok(pairs) => self.remove(collection, &pairs, Some(session)).await,
+                Err(error) => Err(error),
+            }
+        })?;
         Ok(())
     }
 }

@@ -16,8 +16,8 @@ use mongodb::bson::{Document, doc};
 use mongodb::options::ClientOptions;
 use mongodb::{Client, Collection, Database};
 use tinystoragedrivers_core::{
-    Capabilities, Capability, Clock, Result, Scope, ScopedStorage, StorageBackend, StorageError,
-    validate_collection, validate_database,
+    Capabilities, Capability, Clock, Fence, Result, Scope, ScopedStorage, StorageBackend,
+    StorageError, validate_collection, validate_database,
 };
 
 use crate::blobs::MongoBlobs;
@@ -114,7 +114,7 @@ impl fmt::Debug for Shared {
 /// ```
 #[derive(Clone)]
 pub struct MongoStorage {
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
     databases: Arc<Mutex<BTreeMap<String, Arc<Shared>>>>,
 }
 
@@ -205,9 +205,33 @@ impl MongoStorage {
     /// An invalid collection name, or a backend error.
     pub async fn sweep_expired(&self, scope: &Scope, collection: &str) -> Result<u64> {
         validate_collection(collection)?;
-        MongoDocuments::new(Arc::clone(&self.shared), scope.clone())
+        MongoDocuments::new(Arc::clone(&self.shared), scope.clone(), None)
             .sweep(collection, None)
             .await
+    }
+}
+
+impl MongoStorage {
+    fn handles(&self, scope: &Scope, fence: Option<&Arc<Fence>>) -> ScopedStorage {
+        ScopedStorage::new(
+            scope.clone(),
+            self.driver(),
+            Arc::new(MongoDocuments::new(
+                Arc::clone(&self.shared),
+                scope.clone(),
+                fence.cloned(),
+            )),
+            Arc::new(MongoStreams::new(
+                Arc::clone(&self.shared),
+                scope.clone(),
+                fence.cloned(),
+            )),
+            Arc::new(MongoBlobs::new(
+                Arc::clone(&self.shared),
+                scope.clone(),
+                fence.is_some(),
+            )),
+        )
     }
 }
 
@@ -230,19 +254,25 @@ impl StorageBackend for MongoStorage {
             .with(Capability::Ttl);
         if self.shared.transactions {
             base.with(Capability::Transactions)
+                .with(Capability::Fencing)
         } else {
             base
         }
     }
 
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
-        Ok(ScopedStorage::new(
-            scope.clone(),
-            self.driver(),
-            Arc::new(MongoDocuments::new(Arc::clone(&self.shared), scope.clone())),
-            Arc::new(MongoStreams::new(Arc::clone(&self.shared), scope.clone())),
-            Arc::new(MongoBlobs::new(Arc::clone(&self.shared), scope.clone())),
-        ))
+        Ok(self.handles(scope, None))
+    }
+
+    fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
+        if !self.shared.transactions {
+            return Err(StorageError::unsupported(
+                Capability::Fencing,
+                "fencing needs transactions, which this MongoDB deployment lacks",
+            ));
+        }
+        fence.validate()?;
+        Ok(self.handles(scope, Some(&Arc::new(fence.clone()))))
     }
 
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {

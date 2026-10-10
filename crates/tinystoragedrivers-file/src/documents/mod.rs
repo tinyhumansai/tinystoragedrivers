@@ -14,9 +14,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Capabilities, CollectionSpec, Cursor, DocumentStore, Filter, Page, Precondition, Query, Result,
-    Scope, SearchHit, Sort, StorageError, Version, Versioned, validate_collection, validate_doc,
-    value,
+    Capabilities, CollectionSpec, Cursor, DocumentStore, Fence, Filter, Page, Precondition, Query,
+    Result, Scope, SearchHit, Sort, StorageError, Version, Versioned, validate_collection,
+    validate_doc, value,
 };
 
 use crate::encode::fnv1a_64;
@@ -28,11 +28,33 @@ use store::Docs;
 pub struct FileDocuments {
     db: Arc<Db>,
     scope: Scope,
+    /// Checked under the database lock before every write, when set.
+    fence: Option<Arc<Fence>>,
+}
+
+/// Refuse a write unless `fence` (when there is one) holds. Called under the
+/// database lock, so the check and the write are one step for every handle
+/// in this process.
+///
+/// # Errors
+///
+/// [`ErrorKind::Fenced`](tinystoragedrivers_core::ErrorKind::Fenced), or a
+/// failure reading the guard document.
+pub(crate) fn guard(db: &Db, fence: Option<&Fence>) -> Result<()> {
+    let Some(fence) = fence else {
+        return Ok(());
+    };
+    let docs = Docs {
+        db,
+        scope: fence.scope(),
+        now: db.now(),
+    };
+    fence.check(docs.get(fence.collection(), fence.id())?.as_ref())
 }
 
 impl FileDocuments {
-    pub(crate) fn new(db: Arc<Db>, scope: Scope) -> Self {
-        Self { db, scope }
+    pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fence>>) -> Self {
+        Self { db, scope, fence }
     }
 
     /// Run `work` under the database lock with this scope's document view.
@@ -41,9 +63,28 @@ impl FileDocuments {
         T: Send + 'static,
         F: FnOnce(&Docs<'_>) -> Result<T> + Send + 'static,
     {
+        self.run(None, work).await
+    }
+
+    /// [`Self::with`] for a write: the fence (if any) is checked first,
+    /// under the same lock.
+    async fn write<T, F>(&self, work: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Docs<'_>) -> Result<T> + Send + 'static,
+    {
+        self.run(self.fence.clone(), work).await
+    }
+
+    async fn run<T, F>(&self, fence: Option<Arc<Fence>>, work: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Docs<'_>) -> Result<T> + Send + 'static,
+    {
         let scope = self.scope.clone();
         self.db
             .run(move |db| {
+                guard(db, fence.as_deref())?;
                 let docs = Docs {
                     db,
                     scope: &scope,
@@ -106,13 +147,13 @@ impl DocumentStore for FileDocuments {
         precondition: Precondition,
     ) -> Result<Version> {
         let (collection, id) = (collection.to_owned(), id.to_owned());
-        self.with(move |docs| docs.put(&collection, &id, doc, precondition))
+        self.write(move |docs| docs.put(&collection, &id, doc, precondition))
             .await
     }
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
         let (collection, id) = (collection.to_owned(), id.to_owned());
-        self.with(move |docs| docs.delete(&collection, &id, precondition))
+        self.write(move |docs| docs.delete(&collection, &id, precondition))
             .await
     }
 
@@ -142,7 +183,7 @@ impl DocumentStore for FileDocuments {
 
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
         let (collection, filter) = (collection.to_owned(), filter.clone());
-        self.with(move |docs| docs.delete_where(&collection, &filter))
+        self.write(move |docs| docs.delete_where(&collection, &filter))
             .await
     }
 
@@ -160,7 +201,7 @@ impl DocumentStore for FileDocuments {
             sort.to_vec(),
             patch.clone(),
         );
-        self.with(move |docs| {
+        self.write(move |docs| {
             let Some(first) = docs
                 .matching(&collection, &filter, &sort)?
                 .into_iter()
@@ -228,7 +269,7 @@ impl DocumentStore for FileDocuments {
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         let collection = collection.to_owned();
-        self.with(move |docs| docs.drop_collection(&collection))
+        self.write(move |docs| docs.drop_collection(&collection))
             .await
     }
 }
