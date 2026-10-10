@@ -4,13 +4,14 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tinystoragedrivers_core::{
     Blob, BlobMeta, BlobStore, Result, Scope, async_trait, clamp_range, validate_blob_key,
 };
 
 use crate::connection::Db;
 use crate::error::during;
+use crate::fence::{self, Fencing};
 use crate::sql::{Tables, ident};
 
 /// SQLite blobs bound to one scope.
@@ -19,19 +20,58 @@ pub struct SqliteBlobs {
     db: Arc<Db>,
     tables: Arc<Tables>,
     scope: Scope,
+    /// Checked inside every write's transaction, when set.
+    fencing: Option<Arc<Fencing>>,
 }
 
 impl fmt::Debug for SqliteBlobs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SqliteBlobs")
             .field("scope", &self.scope)
+            .field("fenced", &self.fencing.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl SqliteBlobs {
-    pub(crate) fn new(db: Arc<Db>, tables: Arc<Tables>, scope: Scope) -> Self {
-        Self { db, tables, scope }
+    pub(crate) fn new(
+        db: Arc<Db>,
+        tables: Arc<Tables>,
+        scope: Scope,
+        fencing: Option<Arc<Fencing>>,
+    ) -> Self {
+        Self {
+            db,
+            tables,
+            scope,
+            fencing,
+        }
+    }
+
+    /// Run a write. An unfenced write is one statement and runs as it is; a
+    /// fenced one runs in an immediate transaction that checks the fence
+    /// first.
+    async fn write<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+    {
+        let tables = Arc::clone(&self.tables);
+        let fencing = self.fencing.clone();
+        self.db
+            .run(move |conn| {
+                let Some(fencing) = fencing else {
+                    return f(conn);
+                };
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(during("begin"))?;
+                fence::guard(Some(&fencing), &tx, &tables)?;
+                let out = f(&tx)?;
+                tx.commit().map_err(during("commit"))?;
+                Ok(out)
+            })
+            .await
     }
 
     fn table(&self) -> String {
@@ -62,15 +102,14 @@ impl BlobStore for SqliteBlobs {
             content_type: content_type.map(str::to_owned),
         };
         let (scope, row) = (self.scope.clone(), described.clone());
-        self.db
-            .run(move |conn| {
-                conn.execute(
-                    &sql,
-                    params![scope.as_str(), row.key, row.content_type, bytes],
-                )
-                .map_err(during("put blob"))
-            })
-            .await?;
+        self.write(move |conn| {
+            conn.execute(
+                &sql,
+                params![scope.as_str(), row.key, row.content_type, bytes],
+            )
+            .map_err(during("put blob"))
+        })
+        .await?;
         Ok(described)
     }
 
@@ -148,13 +187,12 @@ impl BlobStore for SqliteBlobs {
         validate_blob_key(key)?;
         let sql = format!("DELETE FROM {} WHERE scope = ?1 AND key = ?2", self.table());
         let (scope, key) = (self.scope.clone(), key.to_owned());
-        self.db
-            .run(move |conn| {
-                conn.execute(&sql, params![scope.as_str(), key])
-                    .map(|removed| removed > 0)
-                    .map_err(during("delete blob"))
-            })
-            .await
+        self.write(move |conn| {
+            conn.execute(&sql, params![scope.as_str(), key])
+                .map(|removed| removed > 0)
+                .map_err(during("delete blob"))
+        })
+        .await
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<BlobMeta>> {

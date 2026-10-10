@@ -145,6 +145,25 @@ impl ScopedCollection {
             .await
     }
 
+    /// [`Self::find`], inside `session`'s transaction when there is one.
+    pub(crate) async fn find_in(
+        &self,
+        inner: Document,
+        options: FindOptions,
+        session: Option<&mut ClientSession>,
+    ) -> Result<Vec<Document>> {
+        let Some(session) = session else {
+            return self.find(inner, options).await;
+        };
+        let mut cursor = self
+            .collection
+            .find(self.filter(inner))
+            .with_options(options)
+            .session(&mut *session)
+            .await?;
+        cursor.stream(session).try_collect().await
+    }
+
     /// Open a cursor over matching documents, for callers that stop early.
     pub(crate) async fn cursor(
         &self,

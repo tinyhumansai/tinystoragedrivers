@@ -26,8 +26,8 @@
 //! serialized exactly like the memory driver's and `claim` is atomic. The file
 //! IO runs on tokio's blocking pool when a runtime is present. Several
 //! *processes* writing the same directory are not coordinated: each file
-//! replacement is atomic, but a compare-and-swap or claim can race another
-//! process.
+//! replacement is atomic, but a compare-and-swap, claim or fenced write can
+//! race another process.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -36,8 +36,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tinystoragedrivers_core::{
-    Capabilities, Capability, Clock, Result, Scope, ScopedStorage, StorageBackend, StorageError,
-    validate_database,
+    Capabilities, Capability, Clock, Fence, Result, Scope, ScopedStorage, StorageBackend,
+    StorageError, validate_database,
 };
 
 use crate::blobs::FileBlobs;
@@ -46,12 +46,15 @@ use crate::encode::{dir_components, file_stem};
 use crate::fsio::io_error;
 use crate::streams::FileStreams;
 
-/// What this driver provides: expiry and full-text search. Not transactions,
-/// because a batch spanning several files cannot be made crash-atomic with
-/// renames alone.
+/// What this driver provides: expiry, full-text search and fencing. Not
+/// transactions, because a batch spanning several files cannot be made
+/// crash-atomic with renames alone. Fencing holds only among the handles of
+/// one process, like every other guarantee here: the fence is checked under
+/// the in-process database lock.
 pub(crate) const CAPABILITIES: Capabilities = Capabilities::none()
     .with(Capability::Ttl)
-    .with(Capability::FullText);
+    .with(Capability::FullText)
+    .with(Capability::Fencing);
 
 fn system_clock() -> u64 {
     SystemTime::now()
@@ -203,6 +206,28 @@ impl FileStorage {
         Ok(Self { root, db })
     }
 
+    fn handles(&self, scope: &Scope, fence: Option<&Arc<Fence>>) -> ScopedStorage {
+        ScopedStorage::new(
+            scope.clone(),
+            self.driver(),
+            Arc::new(FileDocuments::new(
+                Arc::clone(&self.db),
+                scope.clone(),
+                fence.cloned(),
+            )),
+            Arc::new(FileStreams::new(
+                Arc::clone(&self.db),
+                scope.clone(),
+                fence.cloned(),
+            )),
+            Arc::new(FileBlobs::new(
+                Arc::clone(&self.db),
+                scope.clone(),
+                fence.cloned(),
+            )),
+        )
+    }
+
     /// The directory this store keeps its root database in.
     #[must_use]
     pub fn dir(&self) -> &Path {
@@ -220,13 +245,12 @@ impl StorageBackend for FileStorage {
     }
 
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
-        Ok(ScopedStorage::new(
-            scope.clone(),
-            self.driver(),
-            Arc::new(FileDocuments::new(Arc::clone(&self.db), scope.clone())),
-            Arc::new(FileStreams::new(Arc::clone(&self.db), scope.clone())),
-            Arc::new(FileBlobs::new(Arc::clone(&self.db), scope.clone())),
-        ))
+        Ok(self.handles(scope, None))
+    }
+
+    fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
+        fence.validate()?;
+        Ok(self.handles(scope, Some(&Arc::new(fence.clone()))))
     }
 
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {

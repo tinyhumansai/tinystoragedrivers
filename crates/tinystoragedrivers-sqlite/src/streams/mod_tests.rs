@@ -17,6 +17,6 @@ fn offsets_round_trip_and_overflow_is_reported() {
 fn handles_render_their_scope() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(&dir.path().join("s.db")).unwrap();
-    let streams = SqliteStreams::new(db, Arc::new(Tables::new("")), Scope::local());
+    let streams = SqliteStreams::new(db, Arc::new(Tables::new("")), Scope::local(), None);
     assert!(format!("{streams:?}").contains("local"));
 }

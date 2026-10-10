@@ -5,21 +5,54 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::MemoryDb;
+use super::state::DbState;
+use super::{Clock, MemoryDb};
 use crate::blob::{Blob, BlobMeta, BlobStore, clamp_range, validate_blob_key};
 use crate::error::Result;
+use crate::fence::Fence;
 use crate::scope::Scope;
 
 /// In-memory blobs bound to one scope.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MemoryBlobs {
     db: Arc<MemoryDb>,
     scope: Scope,
+    clock: Clock,
+    /// Checked under the lock before every write, when set.
+    fence: Option<Arc<Fence>>,
+}
+
+impl std::fmt::Debug for MemoryBlobs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryBlobs")
+            .field("scope", &self.scope)
+            .field("fenced", &self.fence.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl MemoryBlobs {
-    pub(super) fn new(db: Arc<MemoryDb>, scope: Scope) -> Self {
-        Self { db, scope }
+    pub(super) fn new(
+        db: Arc<MemoryDb>,
+        scope: Scope,
+        clock: Clock,
+        fence: Option<Arc<Fence>>,
+    ) -> Self {
+        Self {
+            db,
+            scope,
+            clock,
+            fence,
+        }
+    }
+
+    /// Refuse a write unless this handle's fence (if any) holds. An
+    /// unfenced handle never reads the clock.
+    fn guard(&self, state: &DbState) -> Result<()> {
+        match self.fence.as_deref() {
+            None => Ok(()),
+            fence => state.guard(fence, (self.clock)()),
+        }
     }
 
     fn key(&self, key: &str) -> (String, String) {
@@ -37,6 +70,7 @@ impl BlobStore for MemoryBlobs {
             content_type: content_type.map(str::to_owned),
         };
         let mut state = self.db.lock()?;
+        self.guard(&state)?;
         state.blobs.insert(self.key(key), (meta.clone(), bytes));
         Ok(meta)
     }
@@ -74,6 +108,7 @@ impl BlobStore for MemoryBlobs {
     async fn delete(&self, key: &str) -> Result<bool> {
         validate_blob_key(key)?;
         let mut state = self.db.lock()?;
+        self.guard(&state)?;
         Ok(state.blobs.remove(&self.key(key)).is_some())
     }
 

@@ -14,12 +14,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tinystoragedrivers_core::{
-    Capabilities, Result, Scope, ScopedStorage, StorageBackend, validate_database,
+    Capabilities, Fence, Result, Scope, ScopedStorage, StorageBackend, validate_database,
 };
 
 use crate::blobs::SqliteBlobs;
 use crate::connection::Db;
 use crate::documents::{SqliteDocuments, capabilities};
+use crate::fence::Fencing;
 use crate::native::SqliteNative;
 use crate::sql::Tables;
 use crate::streams::SqliteStreams;
@@ -129,6 +130,32 @@ impl SqliteStorage {
         SqliteNative::new(Arc::clone(&self.db))
     }
 
+    fn handles(&self, scope: &Scope, fencing: Option<&Arc<Fencing>>) -> ScopedStorage {
+        ScopedStorage::new(
+            scope.clone(),
+            self.driver(),
+            Arc::new(SqliteDocuments::new(
+                Arc::clone(&self.db),
+                Arc::clone(&self.tables),
+                scope.clone(),
+                Arc::clone(&self.clock),
+                fencing.cloned(),
+            )),
+            Arc::new(SqliteStreams::new(
+                Arc::clone(&self.db),
+                Arc::clone(&self.tables),
+                scope.clone(),
+                fencing.cloned(),
+            )),
+            Arc::new(SqliteBlobs::new(
+                Arc::clone(&self.db),
+                Arc::clone(&self.tables),
+                scope.clone(),
+                fencing.cloned(),
+            )),
+        )
+    }
+
     /// The database file this storage reads and writes.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -146,26 +173,13 @@ impl StorageBackend for SqliteStorage {
     }
 
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage> {
-        Ok(ScopedStorage::new(
-            scope.clone(),
-            self.driver(),
-            Arc::new(SqliteDocuments::new(
-                Arc::clone(&self.db),
-                Arc::clone(&self.tables),
-                scope.clone(),
-                Arc::clone(&self.clock),
-            )),
-            Arc::new(SqliteStreams::new(
-                Arc::clone(&self.db),
-                Arc::clone(&self.tables),
-                scope.clone(),
-            )),
-            Arc::new(SqliteBlobs::new(
-                Arc::clone(&self.db),
-                Arc::clone(&self.tables),
-                scope.clone(),
-            )),
-        ))
+        Ok(self.handles(scope, None))
+    }
+
+    fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
+        fence.validate()?;
+        let fencing = Arc::new(Fencing::new(fence.clone(), Arc::clone(&self.clock)));
+        Ok(self.handles(scope, Some(&fencing)))
     }
 
     fn database(&self, name: &str) -> Result<Arc<dyn StorageBackend>> {

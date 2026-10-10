@@ -63,6 +63,7 @@ distinct on case-insensitive filesystems (macOS, Windows), never contains `.`
 | `Ttl` | yes | Expired documents stay on disk and read as absent, like the memory driver. |
 | `FullText` | yes | Same tokenizer and scoring as the memory driver. |
 | `Transactions` | no | A batch over several files cannot be crash-atomic with renames, so `atomic_batch` returns `Unsupported`. |
+| `Fencing` | yes | The guard document is checked under the same in-process lock as the write. Like every guarantee here, it holds within one process only. |
 
 ## Concurrency
 

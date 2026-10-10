@@ -26,7 +26,8 @@ fn all_holds_every_capability() {
         vec![
             Capability::FullText,
             Capability::Transactions,
-            Capability::Ttl
+            Capability::Ttl,
+            Capability::Fencing
         ]
     );
 }
@@ -53,6 +54,7 @@ fn renders_names() {
     assert_eq!(Capability::FullText.to_string(), "full_text");
     assert_eq!(Capability::Transactions.to_string(), "transactions");
     assert_eq!(Capability::Ttl.to_string(), "ttl");
+    assert_eq!(Capability::Fencing.to_string(), "fencing");
     assert_eq!(
         format!("{:?}", Capabilities::none().with(Capability::Ttl)),
         "{Ttl}"

@@ -11,9 +11,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::blob::BlobStore;
-use crate::capabilities::Capabilities;
+use crate::capabilities::{Capabilities, Capability};
 use crate::document::DocumentStore;
 use crate::error::{Result, StorageError};
+use crate::fence::Fence;
 use crate::scope::Scope;
 use crate::stream::StreamStore;
 
@@ -33,6 +34,41 @@ pub trait StorageBackend: Send + Sync + fmt::Debug {
     /// backend only serves particular scopes (a single-operator SQLite file
     /// serves only [`Scope::local`]), or a backend error.
     fn for_scope(&self, scope: &Scope) -> Result<ScopedStorage>;
+
+    /// Port handles bound to `scope` whose writes land only while `fence`
+    /// holds (see [`Fence`]). Requires [`Capability::Fencing`].
+    ///
+    /// Every write through the returned handles reads the fence's guard
+    /// document (in this backend and named database, in the fence's own
+    /// scope) in the same atomic step as the write, before the write's own
+    /// precondition. When the guard is absent, expired, or does not match the
+    /// fence's filter, the write fails with
+    /// [`ErrorKind::Fenced`](crate::ErrorKind::Fenced) and changes nothing,
+    /// even if it would have changed nothing anyway.
+    ///
+    /// The fenced writes are the document port's `put`, `delete`,
+    /// `delete_where`, `claim`, `atomic_batch` and `drop_collection`, the
+    /// stream port's `append`, `append_batch`, `truncate_before` and
+    /// `delete_stream`, and the blob port's `put` and `delete`. Reads and
+    /// `ensure_collection` are not fenced. A driver that cannot make one of
+    /// these writes atomic with the check refuses it with
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported)`(Fencing)`
+    /// rather than run it unfenced; each driver's README says which, if any.
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::Unsupported`](crate::ErrorKind::Unsupported) without
+    /// [`Capability::Fencing`] (the default),
+    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) for an
+    /// invalid fence or a scope the backend does not serve, or a backend
+    /// error.
+    fn for_scope_fenced(&self, scope: &Scope, fence: &Fence) -> Result<ScopedStorage> {
+        let _ = (scope, fence);
+        Err(StorageError::unsupported(
+            Capability::Fencing,
+            "this storage driver cannot fence writes",
+        ))
+    }
 
     /// The named database `name` on this backend. The same name always
     /// addresses the same data.

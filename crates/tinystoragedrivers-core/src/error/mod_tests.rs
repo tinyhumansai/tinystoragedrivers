@@ -17,6 +17,7 @@ fn every_constructor_sets_its_kind() {
         (StorageError::crypto("x"), ErrorKind::Crypto),
         (StorageError::unavailable("x"), ErrorKind::Unavailable),
         (StorageError::backend("x"), ErrorKind::Backend),
+        (StorageError::fenced("x"), ErrorKind::Fenced),
     ];
     for (error, kind) in cases {
         assert_eq!(error.kind(), kind);
@@ -37,6 +38,7 @@ fn display_prefixes_the_kind() {
         StorageError::crypto("a").to_string(),
         StorageError::unavailable("a").to_string(),
         StorageError::backend("a").to_string(),
+        StorageError::fenced("a").to_string(),
     ];
     assert_eq!(
         rendered,
@@ -50,6 +52,7 @@ fn display_prefixes_the_kind() {
             "crypto: a",
             "unavailable: a",
             "backend: a",
+            "fenced: a",
         ]
     );
 }

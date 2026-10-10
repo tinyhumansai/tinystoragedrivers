@@ -205,3 +205,64 @@ fn an_exhausted_version_fails_the_write() {
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Backend);
 }
+
+#[test]
+fn fenced_handles_say_so_in_their_debug_output() {
+    let storage = MemoryStorage::new();
+    let fence = crate::Fence::epoch(Scope::local(), "leases", "l", "epoch", 1);
+    let fenced = storage.for_scope_fenced(&Scope::local(), &fence).unwrap();
+    for rendered in [
+        format!("{:?}", fenced.documents()),
+        format!("{:?}", fenced.streams()),
+        format!("{:?}", fenced.blobs()),
+    ] {
+        assert!(rendered.contains("fenced: true"), "{rendered}");
+    }
+    let plain = storage.for_scope(&Scope::local()).unwrap();
+    assert!(format!("{:?}", plain.streams()).contains("fenced: false"));
+}
+
+#[tokio::test]
+async fn a_guard_in_another_database_does_not_fence_this_one() {
+    use serde_json::json;
+    let storage = MemoryStorage::new();
+    storage
+        .database("leases")
+        .unwrap()
+        .for_scope(&Scope::local())
+        .unwrap()
+        .documents()
+        .put(
+            "leases",
+            "l",
+            json!({"epoch": 1}),
+            crate::Precondition::None,
+        )
+        .await
+        .unwrap();
+    let fence = crate::Fence::epoch(Scope::local(), "leases", "l", "epoch", 1);
+    let fenced = storage.for_scope_fenced(&Scope::local(), &fence).unwrap();
+    let refused = fenced
+        .documents()
+        .put("notes", "n", json!({}), crate::Precondition::None)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.kind(), crate::ErrorKind::Fenced);
+}
+
+#[tokio::test]
+async fn unfenced_stream_blob_and_drop_writes_never_read_the_clock() {
+    let reads = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&reads);
+    let storage = MemoryStorage::with_clock(Arc::new(move || {
+        counter.fetch_add(1, Ordering::SeqCst);
+        0
+    }));
+    let scoped = storage.for_scope(&Scope::local()).unwrap();
+    scoped.streams().append("s", json!({"n": 1})).await.unwrap();
+    scoped.streams().delete_stream("s").await.unwrap();
+    scoped.blobs().put("b", vec![1], None).await.unwrap();
+    scoped.blobs().delete("b").await.unwrap();
+    scoped.documents().drop_collection("c").await.unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+}

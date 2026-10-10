@@ -16,6 +16,7 @@ use tinystoragedrivers_core::{
 
 use crate::connection::Db;
 use crate::error::during;
+use crate::fence::{self, Fencing};
 use crate::sql::{Tables, ident};
 
 /// SQLite streams bound to one scope.
@@ -24,12 +25,15 @@ pub struct SqliteStreams {
     db: Arc<Db>,
     tables: Arc<Tables>,
     scope: Scope,
+    /// Checked inside every write's transaction, when set.
+    fencing: Option<Arc<Fencing>>,
 }
 
 impl fmt::Debug for SqliteStreams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SqliteStreams")
             .field("scope", &self.scope)
+            .field("fenced", &self.fencing.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -63,10 +67,22 @@ fn to_stored(offset: u64) -> Result<i64> {
 }
 
 impl SqliteStreams {
-    pub(crate) fn new(db: Arc<Db>, tables: Arc<Tables>, scope: Scope) -> Self {
-        Self { db, tables, scope }
+    pub(crate) fn new(
+        db: Arc<Db>,
+        tables: Arc<Tables>,
+        scope: Scope,
+        fencing: Option<Arc<Fencing>>,
+    ) -> Self {
+        Self {
+            db,
+            tables,
+            scope,
+            fencing,
+        }
     }
 
+    /// Run `f`, inside an immediate transaction that first checks the fence
+    /// when `write` is set.
     async fn with<T, F>(&self, write: bool, f: F) -> Result<T>
     where
         T: Send + 'static,
@@ -74,6 +90,7 @@ impl SqliteStreams {
     {
         let tables = Arc::clone(&self.tables);
         let scope = self.scope.clone();
+        let fencing = self.fencing.clone();
         self.db
             .run(move |conn| {
                 if !write {
@@ -82,6 +99,7 @@ impl SqliteStreams {
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(during("begin"))?;
+                fence::guard(fencing.as_deref(), &tx, &tables)?;
                 let out = f(&tx, &tables, scope.as_str())?;
                 tx.commit().map_err(during("commit"))?;
                 Ok(out)

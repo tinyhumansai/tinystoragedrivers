@@ -88,6 +88,15 @@ id that was itself resolved under the scope.
   (`InvalidInput`). Expired documents that have not been swept still count
   when a new unique index is built.
 - A declaration made by another process is picked up within five seconds.
+- **Fencing** (`for_scope_fenced`) needs transactions. Each fenced document
+  or stream write runs in a transaction that reads the guard document and
+  increments a hidden `_fence` counter on it, so a takeover that rewrites the
+  guard conflicts with every fenced write in flight. Fenced writes through
+  one fence therefore serialize on the guard: contention is retried up to 64
+  times and then returned as `Unavailable`. Fenced blob writes return
+  `Unsupported(Fencing)`, because GridFS cannot join a transaction. The
+  counter is invisible to reads, and the next ordinary write of the guard
+  drops it.
 - Queries whose filter or sort needs Rust evaluation fetch every candidate in
   the scope and collection. Keep such filters for small collections.
 

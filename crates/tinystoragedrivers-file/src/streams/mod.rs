@@ -26,9 +26,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tinystoragedrivers_core::{
-    Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
+    Fence, Result, Scope, StorageError, StreamEntry, StreamStore, validate_stream,
 };
 
+use crate::documents::guard;
 use crate::encode::file_stem;
 use crate::fsio::{
     files_with_suffix, io_error, open_append, open_read, read_json, remove_optional, sync_dir,
@@ -62,6 +63,8 @@ struct Line {
 pub struct FileStreams {
     db: Arc<Db>,
     scope: Scope,
+    /// Checked under the database lock before every write, when set.
+    fence: Option<Arc<Fence>>,
 }
 
 /// The paths of one stream.
@@ -71,8 +74,8 @@ struct Paths {
 }
 
 impl FileStreams {
-    pub(crate) fn new(db: Arc<Db>, scope: Scope) -> Self {
-        Self { db, scope }
+    pub(crate) fn new(db: Arc<Db>, scope: Scope, fence: Option<Arc<Fence>>) -> Self {
+        Self { db, scope, fence }
     }
 
     fn dir(db: &Db, scope: &Scope) -> PathBuf {
@@ -98,6 +101,23 @@ impl FileStreams {
         let (scope, name) = (self.scope.clone(), name.to_owned());
         self.db
             .run(move |db| work(&Self::paths(db, &scope, &name)))
+            .await
+    }
+
+    /// [`Self::with`] for a write: the fence (if any) is checked first,
+    /// under the same lock.
+    async fn write<T, F>(&self, name: &str, work: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Paths) -> Result<T> + Send + 'static,
+    {
+        validate_stream(name)?;
+        let (scope, name, fence) = (self.scope.clone(), name.to_owned(), self.fence.clone());
+        self.db
+            .run(move |db| {
+                guard(db, fence.as_deref())?;
+                work(&Self::paths(db, &scope, &name))
+            })
             .await
     }
 }
@@ -215,7 +235,7 @@ impl StreamStore for FileStreams {
 
     async fn append_batch(&self, stream: &str, values: Vec<Value>) -> Result<u64> {
         let name = stream.to_owned();
-        self.with(stream, move |paths| {
+        self.write(stream, move |paths| {
             let existing = read_meta(paths, &name)?;
             if values.is_empty() {
                 return existing.map_or(Ok(0), |meta| stream_len(paths, &meta));
@@ -296,7 +316,7 @@ impl StreamStore for FileStreams {
 
     async fn truncate_before(&self, stream: &str, offset: u64) -> Result<u64> {
         let name = stream.to_owned();
-        self.with(stream, move |paths| {
+        self.write(stream, move |paths| {
             let Some(mut meta) = read_meta(paths, &name)? else {
                 return Ok(0);
             };
@@ -342,7 +362,7 @@ impl StreamStore for FileStreams {
 
     async fn delete_stream(&self, stream: &str) -> Result<bool> {
         let name = stream.to_owned();
-        self.with(stream, move |paths| {
+        self.write(stream, move |paths| {
             if read_meta(paths, &name)?.is_none() {
                 return Ok(false);
             }

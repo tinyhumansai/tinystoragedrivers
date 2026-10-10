@@ -35,6 +35,11 @@ pub enum ErrorKind {
     Unavailable,
     /// Any other backend failure.
     Backend,
+    /// A write through a fenced handle was refused because its
+    /// [`Fence`](crate::Fence) no longer holds: the guard document is gone,
+    /// expired, or moved on (a newer lease epoch). Nothing was written.
+    /// Not retryable: the caller lost the right to write.
+    Fenced,
 }
 
 impl fmt::Display for ErrorKind {
@@ -49,6 +54,7 @@ impl fmt::Display for ErrorKind {
             Self::Crypto => f.write_str("crypto"),
             Self::Unavailable => f.write_str("unavailable"),
             Self::Backend => f.write_str("backend"),
+            Self::Fenced => f.write_str("fenced"),
         }
     }
 }
@@ -142,6 +148,12 @@ impl StorageError {
     #[must_use]
     pub fn backend(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Backend, message)
+    }
+
+    /// [`ErrorKind::Fenced`].
+    #[must_use]
+    pub fn fenced(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Fenced, message)
     }
 
     /// What went wrong.

@@ -10,7 +10,7 @@
 //! Every write runs in an immediate transaction under the shared connection,
 //! which makes preconditions, unique indexes, claims and batches atomic.
 
-mod ops;
+pub(crate) mod ops;
 mod pushdown;
 
 use std::fmt;
@@ -26,6 +26,7 @@ use tinystoragedrivers_core::{
 
 use crate::connection::Db;
 use crate::error::during;
+use crate::fence::{self, Fencing};
 use crate::sql::Tables;
 use crate::storage::Clock;
 
@@ -43,6 +44,8 @@ pub struct SqliteDocuments {
     tables: Arc<Tables>,
     scope: Scope,
     clock: Clock,
+    /// Checked inside every write's transaction, when set.
+    fencing: Option<Arc<Fencing>>,
 }
 
 impl fmt::Debug for SqliteDocuments {
@@ -50,23 +53,43 @@ impl fmt::Debug for SqliteDocuments {
         f.debug_struct("SqliteDocuments")
             .field("scope", &self.scope)
             .field("path", &self.db.path())
+            .field("fenced", &self.fencing.is_some())
             .finish_non_exhaustive()
     }
 }
 
+/// How a call touches the database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// A plain read.
+    Read,
+    /// A schema declaration: transactional, but never fenced.
+    Declare,
+    /// A data write: transactional and fenced.
+    Write,
+}
+
 impl SqliteDocuments {
-    pub(crate) fn new(db: Arc<Db>, tables: Arc<Tables>, scope: Scope, clock: Clock) -> Self {
+    pub(crate) fn new(
+        db: Arc<Db>,
+        tables: Arc<Tables>,
+        scope: Scope,
+        clock: Clock,
+        fencing: Option<Arc<Fencing>>,
+    ) -> Self {
         Self {
             db,
             tables,
             scope,
             clock,
+            fencing,
         }
     }
 
     /// Run `f` with a context for this handle, inside an immediate
-    /// transaction when `write` is set.
-    async fn with<T, F>(&self, write: bool, f: F) -> Result<T>
+    /// transaction unless it only reads. A fenced handle checks its fence in
+    /// that transaction before a [`Access::Write`].
+    async fn with<T, F>(&self, access: Access, f: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&Connection, Ctx<'_>) -> Result<T> + Send + 'static,
@@ -74,6 +97,7 @@ impl SqliteDocuments {
         let tables = Arc::clone(&self.tables);
         let scope = self.scope.clone();
         let now_ms = (self.clock)();
+        let fencing = self.fencing.clone();
         self.db
             .run(move |conn| {
                 let ctx = Ctx {
@@ -81,12 +105,15 @@ impl SqliteDocuments {
                     scope: scope.as_str(),
                     now_ms,
                 };
-                if !write {
+                if access == Access::Read {
                     return f(conn, ctx);
                 }
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(during("begin"))?;
+                if access == Access::Write {
+                    fence::guard(fencing.as_deref(), &tx, &tables)?;
+                }
                 let out = f(&tx, ctx)?;
                 tx.commit().map_err(during("commit"))?;
                 Ok(out)
@@ -129,7 +156,7 @@ impl DocumentStore for SqliteDocuments {
     async fn ensure_collection(&self, spec: &CollectionSpec) -> Result<()> {
         spec.validate()?;
         let spec = spec.clone();
-        self.with(true, move |conn, ctx| {
+        self.with(Access::Declare, move |conn, ctx| {
             ops::declare(conn, ctx.tables, &spec, ctx.now_ms)
         })
         .await
@@ -137,7 +164,7 @@ impl DocumentStore for SqliteDocuments {
 
     async fn get(&self, collection: &str, id: &str) -> Result<Option<Versioned<Value>>> {
         let (collection, id) = (collection.to_owned(), id.to_owned());
-        self.with(false, move |conn, ctx| {
+        self.with(Access::Read, move |conn, ctx| {
             ops::get(conn, ctx, &collection, &id)
         })
         .await
@@ -151,7 +178,7 @@ impl DocumentStore for SqliteDocuments {
         precondition: Precondition,
     ) -> Result<Version> {
         let (collection, id) = (collection.to_owned(), id.to_owned());
-        self.with(true, move |conn, ctx| {
+        self.with(Access::Write, move |conn, ctx| {
             ops::put(conn, ctx, &collection, &id, &doc, precondition)
         })
         .await
@@ -159,7 +186,7 @@ impl DocumentStore for SqliteDocuments {
 
     async fn delete(&self, collection: &str, id: &str, precondition: Precondition) -> Result<bool> {
         let (collection, id) = (collection.to_owned(), id.to_owned());
-        self.with(true, move |conn, ctx| {
+        self.with(Access::Write, move |conn, ctx| {
             ops::delete(conn, ctx, &collection, &id, precondition)
         })
         .await
@@ -170,7 +197,7 @@ impl DocumentStore for SqliteDocuments {
         let start = parse_cursor(collection, query)?;
         let fingerprint = fingerprint(collection, query)?;
         let (collection, query) = (collection.to_owned(), query.clone());
-        self.with(false, move |conn, ctx| {
+        self.with(Access::Read, move |conn, ctx| {
             let found = ops::matching(conn, ctx, &collection, &query.filter, &query.sort)?;
             let end = query.limit.map_or(found.len(), |limit| {
                 start.saturating_add(limit).min(found.len())
@@ -185,7 +212,7 @@ impl DocumentStore for SqliteDocuments {
 
     async fn count(&self, collection: &str, filter: &Filter) -> Result<u64> {
         let (collection, filter) = (collection.to_owned(), filter.clone());
-        self.with(false, move |conn, ctx| {
+        self.with(Access::Read, move |conn, ctx| {
             Ok(ops::matching(conn, ctx, &collection, &filter, &[])?.len() as u64)
         })
         .await
@@ -193,7 +220,7 @@ impl DocumentStore for SqliteDocuments {
 
     async fn delete_where(&self, collection: &str, filter: &Filter) -> Result<u64> {
         let (collection, filter) = (collection.to_owned(), filter.clone());
-        self.with(true, move |conn, ctx| {
+        self.with(Access::Write, move |conn, ctx| {
             ops::delete_where(conn, ctx, &collection, &filter)
         })
         .await
@@ -213,7 +240,7 @@ impl DocumentStore for SqliteDocuments {
             sort.to_vec(),
             patch.clone(),
         );
-        self.with(true, move |conn, ctx| {
+        self.with(Access::Write, move |conn, ctx| {
             let Some(first) = ops::matching(conn, ctx, &collection, &filter, &sort)?
                 .into_iter()
                 .next()
@@ -240,7 +267,7 @@ impl DocumentStore for SqliteDocuments {
     }
 
     async fn atomic_batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteResult>> {
-        self.with(true, move |conn, ctx| {
+        self.with(Access::Write, move |conn, ctx| {
             ops.into_iter()
                 .map(|op| match op {
                     WriteOp::Put {
@@ -267,7 +294,7 @@ impl DocumentStore for SqliteDocuments {
     async fn search(&self, collection: &str, text: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let (collection, text) = (collection.to_owned(), text.to_owned());
         let hits = self
-            .with(false, move |conn, ctx| {
+            .with(Access::Read, move |conn, ctx| {
                 ops::search(conn, ctx, &collection, &text, limit)
             })
             .await?;
@@ -279,7 +306,7 @@ impl DocumentStore for SqliteDocuments {
 
     async fn drop_collection(&self, collection: &str) -> Result<()> {
         let collection = collection.to_owned();
-        self.with(true, move |conn, ctx| {
+        self.with(Access::Write, move |conn, ctx| {
             ops::drop_collection(conn, ctx, &collection)
         })
         .await

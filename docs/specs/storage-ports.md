@@ -77,6 +77,8 @@ Versioned JSON **objects** in named collections.
   - `Transactions`: `atomic_batch`, all or nothing.
   - `FullText`: `search` over the declared `SearchSpec` fields. Conformance
     checks single-token membership only, never ranking.
+  - `Fencing`: `StorageBackend::for_scope_fenced`, see
+    [`write-fencing.md`](write-fencing.md).
 
 ### `StreamStore`
 
@@ -99,6 +101,9 @@ listing.
   scopes in `for_scope`.
 - `database(name)` returns an independent named database. Names are 1–64 bytes
   of lowercase `[a-z0-9_-]`. The same name always addresses the same data.
+- `for_scope_fenced(scope, fence)` returns handles whose writes the driver
+  checks atomically against a guard document (`Capability::Fencing`,
+  `ErrorKind::Fenced`). See [`write-fencing.md`](write-fencing.md).
 - OpenHuman's scope is the agent id. The cloud deployment runs one agent per
   user, so this is the user.
 
