@@ -3340,7 +3340,7 @@ dependencies = [
  "clack-private-fs",
  "fs4",
  "hkdf",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "keyring",
  "reqwest 0.12.28",
  "rustix 1.1.5",
