@@ -30,7 +30,7 @@ tinystoragedrivers-client = { path = "crates/tinystoragedrivers-client" }
 tinystoragedrivers-busproxy = { path = "crates/tinystoragedrivers-busproxy" }
 # SHA-256 binds Mongo watch cursors, protects native secret key identities and
 # names over-long document keys (`Key::of`).
-sha2 = "0.10"
+sha2 = "0.11"
 # Lowercase base32 text of the SHA-256 digest that stands in for a scope segment the
 # grammar cannot hold (`Scope::tenant`, `agent`, `module`).
 data-encoding = "2"
