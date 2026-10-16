@@ -38,7 +38,7 @@ keyring = { version = "3", optional = true, features = ["apple-native", "windows
 # Cloud KMS transports are opt-in; no cloud SDK enters desktop builds.
 reqwest = { workspace = true, features = ["json", "rustls-tls"], optional = true }
 bytes = { workspace = true, optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 hmac = { version = "0.12", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
 
