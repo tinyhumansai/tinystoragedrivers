@@ -3754,7 +3754,7 @@ dependencies = [
  "object_store",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "tinystoragedrivers-api",
  "tinystoragedrivers-connect",
