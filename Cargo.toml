@@ -84,7 +84,7 @@ zeroize = "1"
 thiserror = "2"
 # Time-sortable 26-character entity ids (`Key::ulid`); the only id generator the
 # core needs, and it links no database client or transport.
-ulid = "1"
+ulid = "3"
 # Sealed streams are stored as one zstd-compressed blob (`StreamStore::seal`).
 # Only the codec is needed, so the dictionary builder and legacy-format
 # decoders are left out. It links a C library but no database client or
