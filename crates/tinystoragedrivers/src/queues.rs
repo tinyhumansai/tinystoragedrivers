@@ -22,8 +22,14 @@ pub enum QueueConfig {
 impl QueueConfig {
     /// Parse `storage`, an empty string, or an AMQP broker URL.
     ///
+    /// A broker URL must pass `tinystoragedrivers_queue::check_broker_url`:
+    /// credentials over plaintext `amqp://` are refused unless the host is
+    /// loopback or the URL opts in with `?insecure=true`. The URL is kept as
+    /// given; the opt-in is stripped when the queue port connects.
+    ///
     /// # Errors
-    /// Returns `InvalidInput` for malformed or feature-disabled broker URLs.
+    /// Returns `InvalidInput` for malformed or feature-disabled broker URLs and
+    /// for plaintext credentials without the opt-in.
     pub fn parse(url: &str) -> Result<Self> {
         let url = url.trim();
         if url.is_empty() || url == "storage" {
@@ -35,9 +41,12 @@ impl QueueConfig {
                 "an amqp queue URL needs the rabbitmq feature",
             ));
             #[cfg(feature = "rabbitmq")]
-            return Ok(Self::RabbitMq {
-                url: url.to_owned(),
-            });
+            {
+                tinystoragedrivers_queue::check_broker_url(url)?;
+                return Ok(Self::RabbitMq {
+                    url: url.to_owned(),
+                });
+            }
         }
         Err(StorageError::invalid_input(
             "a queue URL is `storage`, `amqp://…` or `amqps://…`",

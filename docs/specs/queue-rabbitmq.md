@@ -105,6 +105,15 @@ a new `Storage` bundle with its queue port replaced by a scope-bound
 `RabbitQueues`. Queue manifests and declaration policy belong to the host.
 `QueueConfig` redacts credentials when rendered.
 
+Broker URLs that send credentials in clear text are refused, both by
+`QueueConfig::parse` and by `RabbitQueues::connect`
+(`tinystoragedrivers_queue::check_broker_url`): an `amqp://` URL with
+userinfo needs a loopback host (`localhost`, `127.0.0.0/8` or `::1`) or the
+explicit opt-in `?insecure=true` for a trusted private network. `amqps://`
+and credential-free URLs are unaffected. The opt-in is removed from the URL
+before connecting, so it never reaches the broker, and the error never
+contains the URL. Hosts may apply a stricter rule of their own.
+
 ## Acceptance
 
 `conformance::run_queue` passes against a live broker

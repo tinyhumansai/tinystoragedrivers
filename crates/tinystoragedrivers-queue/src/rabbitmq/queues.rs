@@ -96,12 +96,19 @@ impl RabbitQueues {
     /// handle to `scope`. Must be called inside a Tokio runtime: the handle
     /// runs a task that settles lapsed leases.
     ///
+    /// The URL must pass [`check_broker_url`](super::check_broker_url):
+    /// credentials over plaintext `amqp://` are refused unless the host is
+    /// loopback or the URL opts in with `?insecure=true`, which is stripped
+    /// before connecting.
+    ///
     /// # Errors
     ///
-    /// `Unavailable` when the broker cannot be reached. The message never
-    /// contains the URL.
+    /// `InvalidInput` when the URL sends credentials in clear text without
+    /// opting in. `Unavailable` when the broker cannot be reached. Neither
+    /// message contains the URL.
     pub async fn connect(url: &str, scope: &Scope) -> Result<Self> {
-        let link = Link::open(url).await?;
+        let url = super::check_broker_url(url)?;
+        let link = Link::open(&url).await?;
         let inner = Arc::new(Inner {
             prefix: names::prefix(scope),
             link: AsyncMutex::new(link),

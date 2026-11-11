@@ -21,7 +21,7 @@ pub use document::{DocumentQueue, GROUPS, MESSAGES, SPECS, collection_specs, ens
 #[cfg(feature = "memory")]
 pub use memory::MemoryQueue;
 #[cfg(feature = "rabbitmq")]
-pub use rabbitmq::{MAX_DELAY_MS, RabbitQueues};
+pub use rabbitmq::{MAX_DELAY_MS, RabbitQueues, check_broker_url};
 
 pub use tinystoragedrivers_api::QueueStore;
 pub use tinystoragedrivers_types::{

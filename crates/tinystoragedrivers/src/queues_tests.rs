@@ -99,3 +99,31 @@ async fn configured_rabbitmq_port_preserves_other_ports_and_delivers_messages() 
     );
     storage.queues().purge(&queue).await.unwrap();
 }
+
+#[cfg(feature = "rabbitmq")]
+#[test]
+fn plaintext_broker_credentials_need_loopback_or_the_opt_in() {
+    let refused = QueueConfig::parse("amqp://user:secret@broker.example/vhost").unwrap_err();
+    assert!(refused.message().contains("amqps://"));
+    assert!(!refused.message().contains("secret"));
+    for allowed in [
+        "amqps://user:secret@broker.example/vhost",
+        "amqp://user:secret@localhost/vhost",
+        "amqp://broker.example/vhost",
+    ] {
+        assert_eq!(
+            QueueConfig::parse(allowed).unwrap(),
+            QueueConfig::RabbitMq {
+                url: allowed.to_owned()
+            }
+        );
+    }
+    // The opt-in stays on the parsed URL; the queue port strips it on connect.
+    let opted_in = "amqp://user:secret@broker.example/vhost?insecure=true";
+    assert_eq!(
+        QueueConfig::parse(opted_in).unwrap(),
+        QueueConfig::RabbitMq {
+            url: opted_in.to_owned()
+        }
+    );
+}
