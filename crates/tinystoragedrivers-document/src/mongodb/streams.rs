@@ -31,6 +31,8 @@ pub struct MongoStreams {
     condition_guard: Option<super::documents::MongoDocuments>,
     #[cfg(test)]
     truncate_pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    #[cfg(test)]
+    seal_pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 impl std::fmt::Debug for MongoStreams {
@@ -62,6 +64,8 @@ impl MongoStreams {
             condition_guard: None,
             #[cfg(test)]
             truncate_pause: None,
+            #[cfg(test)]
+            seal_pause: None,
         }
     }
 
@@ -112,6 +116,26 @@ impl MongoStreams {
     #[cfg(test)]
     async fn pause_at_truncate_boundary(&self) {
         if let Some((started, resume)) = &self.truncate_pause {
+            started.notify_one();
+            resume.notified().await;
+        }
+    }
+
+    /// Pause a seal after its segment snapshot and blob upload, before the
+    /// marker is published.
+    #[cfg(test)]
+    pub(crate) fn pause_seal_for_test(
+        mut self,
+        started: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        self.seal_pause = Some((started, resume));
+        self
+    }
+
+    #[cfg(test)]
+    async fn pause_at_seal_boundary(&self) {
+        if let Some((started, resume)) = &self.seal_pause {
             started.notify_one();
             resume.notified().await;
         }
@@ -393,13 +417,67 @@ impl MongoStreams {
     }
 
     async fn generation(&self, stream: &str) -> Result<i64> {
-        Ok(self
+        Ok(self.head_state(stream).await?.0)
+    }
+
+    /// The stream's generation and truncation floor, the lowest offset a
+    /// read may return. A head without a floor (written before it existed, or
+    /// only ever truncated transactionally) has floor zero.
+    async fn head_state(&self, stream: &str) -> Result<(i64, u64)> {
+        let head = self
             .heads()
             .find_one(self.head_filter(stream))
             .await
-            .map_err(mongo_error("read a stream head"))?
+            .map_err(mongo_error("read a stream head"))?;
+        let generation = head
+            .as_ref()
             .and_then(|head| head.get_i64("g").ok())
-            .unwrap_or(0))
+            .unwrap_or(0);
+        let floor = head
+            .as_ref()
+            .and_then(|head| head.get_i64("floor").ok())
+            .and_then(|floor| u64::try_from(floor).ok())
+            .unwrap_or(0);
+        Ok((generation, floor))
+    }
+
+    /// Raise the standalone truncation floor of `generation` to `cut` before
+    /// any segment is edited. Readers clip at the floor, so the truncation is
+    /// visible at once and a seal racing it needs no rollback.
+    async fn publish_truncation_floor(
+        &self,
+        stream: &str,
+        generation: i64,
+        cut: u64,
+    ) -> Result<()> {
+        let cut = i64::try_from(cut)
+            .map_err(|_| StorageError::backend("stream offset space is exhausted"))?;
+        let mut filter = doc! {"_id": {"_scope": self.scope.as_str(), "s": stream}, "_scope": self.scope.as_str(), "s": stream};
+        if generation == 0 {
+            filter.insert(
+                "$or",
+                vec![doc! {"g": 0_i64}, doc! {"g": {"$exists": false}}],
+            );
+        } else {
+            filter.insert("g", generation);
+        }
+        // Upserting on the head's `_id` creates a missing head; a head that
+        // moved to a later generation collides on `_id` instead.
+        match self
+            .heads()
+            .update_one(
+                filter,
+                doc! {"$max": {"floor": cut, "g": 0_i64}, "$inc": {"truncate_epoch": 1_i64}},
+            )
+            .upsert(true)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.to_string().contains("E11000") => Err(StorageError::conflict(
+                "stream was deleted while truncating",
+            )),
+            Err(error) => Err(mongo_error("record a stream truncation")(error)),
+        }
     }
 
     async fn advance_generation(&self, stream: &str, generation: i64) -> Result<()> {
@@ -414,7 +492,10 @@ impl MongoStreams {
         }
         let result = self
             .heads()
-            .update_one(filter, doc! {"$inc": {"g": 1_i64}})
+            .update_one(
+                filter,
+                doc! {"$inc": {"g": 1_i64}, "$set": {"floor": 0_i64}},
+            )
             .await
             .map_err(mongo_error("advance a stream generation"))?;
         if result.matched_count != 1 {
@@ -440,7 +521,10 @@ impl MongoStreams {
         }
         let result = self
             .heads()
-            .update_one(filter, doc! {"$inc": {"g": 1_i64}})
+            .update_one(
+                filter,
+                doc! {"$inc": {"g": 1_i64}, "$set": {"floor": 0_i64}},
+            )
             .session(session)
             .await
             .map_err(|error| transaction_conflict_error("advance a stream generation", error))?;
@@ -768,7 +852,8 @@ impl StreamStore for MongoStreams {
 
     async fn read_window(&self, stream: &str, from: u64, limit: usize) -> Result<Vec<StreamEntry>> {
         validate_stream(stream)?;
-        let generation = self.generation(stream).await?;
+        let (generation, floor) = self.head_state(stream).await?;
+        let from = from.max(floor);
         let rows = self.segment_rows_in_generation(stream, generation).await?;
         if let Some(marker) = rows
             .last()
@@ -825,20 +910,29 @@ impl StreamStore for MongoStreams {
         if last.get_bool("seal").unwrap_or(false) {
             return Err(StorageError::conflict("stream is sealed"));
         }
+        let (generation, floor) = self.head_state(stream).await?;
         let (base, len, _) = self.extent(stream).await?;
+        let base = base.max(floor).min(len);
         let cut = offset.clamp(base, len);
         let removed = cut - base;
         if removed == 0 {
             return Ok(0);
         }
         if self
-            .segment_rows(stream)
+            .segment_rows_in_generation(stream, generation)
             .await?
             .last()
             .is_some_and(|row| row.get_bool("seal").unwrap_or(false))
         {
             return Err(StorageError::conflict("stream was sealed while truncating"));
         }
+        // The floor first: from here every read starts at `cut`, so the row
+        // edits below are only reclamation. A seal that lands meanwhile is
+        // clipped at the floor too and never has to be withdrawn.
+        self.publish_truncation_floor(stream, generation, cut)
+            .await?;
+        #[cfg(test)]
+        self.pause_at_truncate_boundary().await;
         let last_id = last.get("_id").cloned().unwrap_or(Bson::Null);
         for row in rows {
             let start = row
@@ -880,27 +974,6 @@ impl StreamStore for MongoStreams {
                     .await
                     .map_err(mongo_error("truncate a stream"))?;
             }
-        }
-        // Match the legacy standalone protocol: publish the epoch only after
-        // the segment edits are complete. A seal that snapshots before this
-        // point either sees the edited rows or is rejected by the epoch check.
-        #[cfg(test)]
-        self.pause_at_truncate_boundary().await;
-        self.heads()
-            .update_one(
-                doc! {"_id": {"_scope": self.scope.as_str(), "s": stream}, "_scope": self.scope.as_str(), "s": stream},
-                doc! {"$inc": {"truncate_epoch": 1_i64}, "$max": {"g": 0_i64}},
-            )
-            .upsert(true)
-            .await
-            .map_err(mongo_error("record a stream truncation"))?;
-        if self
-            .segment_rows(stream)
-            .await?
-            .last()
-            .is_some_and(|row| row.get_bool("seal").unwrap_or(false))
-        {
-            return Err(StorageError::conflict("stream was sealed while truncating"));
         }
         Ok(removed)
     }
@@ -965,7 +1038,8 @@ impl StreamStore for MongoStreams {
 
     async fn info(&self, stream: &str) -> Result<Option<StreamInfo>> {
         validate_stream(stream)?;
-        let rows = self.segment_rows(stream).await?;
+        let (generation, floor) = self.head_state(stream).await?;
+        let rows = self.segment_rows_in_generation(stream, generation).await?;
         if let Some(marker) = rows
             .last()
             .filter(|row| row.get_bool("seal").unwrap_or(false))
@@ -979,7 +1053,9 @@ impl StreamStore for MongoStreams {
                 .get_i64("sb")
                 .ok()
                 .and_then(|value| u64::try_from(value).ok())
-                .unwrap_or(len);
+                .unwrap_or(len)
+                .max(floor)
+                .min(len);
             return Ok(Some(StreamInfo::new(
                 base,
                 len,
@@ -991,7 +1067,12 @@ impl StreamStore for MongoStreams {
         if len == 0 && rows.is_empty() {
             return Ok(None);
         }
-        Ok(Some(StreamInfo::new(base, len, None, last)))
+        Ok(Some(StreamInfo::new(
+            base.max(floor).min(len),
+            len,
+            None,
+            last,
+        )))
     }
 
     async fn seal(&self, stream: &str) -> Result<SealOutcome> {
@@ -1032,7 +1113,12 @@ impl StreamStore for MongoStreams {
                 .ok_or_else(|| StorageError::backend("sealed stream has no blob"))?;
             self.delete_unsealed_rows_after_seal(stream, generation)
                 .await?;
-            return Ok(SealOutcome::new(log.base(), log.len(), blob.len));
+            let floor = self.head_state(stream).await?.1;
+            return Ok(SealOutcome::new(
+                log.base().max(floor).min(log.len()),
+                log.len(),
+                blob.len,
+            ));
         }
         let len = last
             .get_i64("e")
@@ -1093,6 +1179,8 @@ impl StreamStore for MongoStreams {
         if let Some(last_append) = last_append {
             marker.insert("la", last_append);
         }
+        #[cfg(test)]
+        self.pause_at_seal_boundary().await;
         if self.transactions {
             if let Err(error) = self
                 .publish_seal_marker(stream, generation, epoch, append_epoch, marker)
@@ -1107,34 +1195,53 @@ impl StreamStore for MongoStreams {
                 return Err(error);
             }
         } else {
+            // The unique `(_scope, s, g, o)` index arbitrates appends: one that
+            // took offset `len` first fails this insert, and one after it sees
+            // the marker and refuses. A racing truncation has raised the floor
+            // before touching rows, and reads clip at it, so neither needs a
+            // rollback once the marker is in.
             if let Err(error) = self.segments().insert_one(marker).await {
+                let _ = blobs.delete_sealed(&unique_key).await;
                 if error.to_string().contains("E11000") {
                     return Err(StorageError::conflict("stream changed while sealing"));
                 }
                 return Err(mongo_error("mark a sealed stream")(error));
             }
-            let latest_epoch = self
-                .heads()
-                .find_one(self.head_filter(stream))
-                .await
-                .map_err(mongo_error("verify a stream truncation epoch"))?
-                .and_then(|head| head.get_i64("truncate_epoch").ok())
-                .unwrap_or(0);
-            let latest_append_epoch = self
-                .heads()
-                .find_one(self.head_filter(stream))
-                .await
-                .map_err(mongo_error("verify a stream append epoch"))?
-                .and_then(|head| head.get_i64("append_epoch").ok())
-                .unwrap_or(0);
-            if latest_epoch != epoch || latest_append_epoch != append_epoch {
-                self.segments().delete_one(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation, "seal": true}).await.map_err(mongo_error("roll back stream sealing"))?;
-                return Err(StorageError::conflict("stream was truncated while sealing"));
+            let (latest_generation, floor) = self.head_state(stream).await?;
+            if latest_generation != generation {
+                // The stream was deleted after the snapshot: the marker landed
+                // in a dead generation that no reader sees.
+                self.segments()
+                    .delete_one(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation, "seal": true, "bk": &unique_key})
+                    .await
+                    .map_err(mongo_error("roll back stream sealing"))?;
+                let _ = blobs.delete_sealed(&unique_key).await;
+                return Err(StorageError::conflict("stream was deleted while sealing"));
             }
-        }
-        if !self.transactions {
+            // A row past this snapshot's end means the stream moved on and a
+            // newer seal already published (it removed the rows this marker
+            // would otherwise collide with). The newer marker sorts after this
+            // one, so readers never see it; withdraw it.
+            let newer = self
+                .segments()
+                .find_one(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation, "o": {"$gt": len_i}})
+                .await
+                .map_err(mongo_error("verify a stream seal"))?;
+            if newer.is_some() {
+                self.segments()
+                    .delete_one(doc! {"_scope": self.scope.as_str(), "s": stream, "g": generation, "seal": true, "bk": &unique_key})
+                    .await
+                    .map_err(mongo_error("roll back stream sealing"))?;
+                let _ = blobs.delete_sealed(&unique_key).await;
+                return Err(StorageError::conflict("stream changed while sealing"));
+            }
             self.delete_unsealed_rows_after_seal(stream, generation)
                 .await?;
+            return Ok(SealOutcome::new(
+                base.max(floor).min(len),
+                len,
+                encoded.len() as u64,
+            ));
         }
         Ok(SealOutcome::new(base, len, encoded.len() as u64))
     }

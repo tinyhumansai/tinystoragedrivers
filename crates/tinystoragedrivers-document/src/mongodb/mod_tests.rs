@@ -1409,10 +1409,9 @@ async fn standalone_truncate_and_seal_linearize_without_losing_the_truncated_vie
     let sealed = streams.seal("events").await.unwrap();
     assert_eq!((sealed.base, sealed.len), (1, 2));
     resume_truncate.notify_one();
-    assert_eq!(
-        truncating.await.unwrap().unwrap_err().kind(),
-        tinystoragedrivers_types::ErrorKind::Conflict
-    );
+    // The truncation published its floor before the seal began, so it took
+    // effect: it reports what it removed instead of a conflict after its edits.
+    assert_eq!(truncating.await.unwrap().unwrap(), 1);
     assert_eq!(
         streams.read_window("events", 0, 10).await.unwrap(),
         vec![tinystoragedrivers_types::StreamEntry {
@@ -1537,6 +1536,9 @@ async fn transactional_truncation_invalidates_a_seal_snapshot_taken_before_blob_
         return;
     };
     let connection = test_connection(&uri, "tsd26_seal_truncate_race").await;
+    // The transactional seal path; a standalone server takes the floor path,
+    // where a truncation racing a seal is clipped rather than refused.
+    assert!(connection.transactions_available());
     let put_started = Arc::new(tokio::sync::Notify::new());
     let allow_put = Arc::new(tokio::sync::Notify::new());
     let blobs = Arc::new(TestBlobs {
@@ -2269,5 +2271,184 @@ async fn native_watch_invalidates_for_scope_mutations_and_rejects_cross_binding_
             .unwrap(),
         WatchNotice::Invalidated { .. }
     ));
+    connection.database().drop().await.unwrap();
+}
+
+/// A standalone stream whose seal pauses after its snapshot and blob upload.
+async fn paused_standalone_seal(
+    stem: &str,
+) -> (
+    MongoConnection,
+    MongoStreams,
+    Arc<TestBlobs>,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
+    let uri = std::env::var("TSD_MONGO_URL").unwrap();
+    let connection = test_connection(&uri, stem).await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let blobs = Arc::new(TestBlobs::default());
+    let streams = MongoStreams::new(connection.clone(), Scope::new("scope-a").unwrap())
+        .with_blob_store(blobs.clone())
+        .without_transactions_for_test()
+        .pause_seal_for_test(Arc::clone(&started), Arc::clone(&resume));
+    streams
+        .append_batch(
+            "events",
+            vec![serde_json::json!("discard"), serde_json::json!("keep")],
+        )
+        .await
+        .unwrap();
+    (connection, streams, blobs, started, resume)
+}
+
+#[tokio::test]
+async fn a_truncation_finished_during_a_standalone_seal_never_withdraws_it() {
+    if std::env::var("TSD_MONGO_URL").is_err() {
+        return;
+    }
+    let (connection, streams, _blobs, started, resume) =
+        paused_standalone_seal("tsd49_seal_truncated").await;
+    let sealing = {
+        let streams = streams.clone();
+        tokio::spawn(async move { streams.seal("events").await })
+    };
+    started.notified().await;
+    assert_eq!(streams.truncate_before("events", 1).await.unwrap(), 1);
+    resume.notify_one();
+    let sealed = sealing.await.unwrap().unwrap();
+    assert_eq!((sealed.base, sealed.len), (1, 2));
+    let info = streams.info("events").await.unwrap().unwrap();
+    assert_eq!((info.base, info.len), (1, 2));
+    assert_eq!(
+        streams.read_window("events", 0, 10).await.unwrap(),
+        vec![tinystoragedrivers_types::StreamEntry {
+            offset: 1,
+            value: serde_json::json!("keep"),
+        }]
+    );
+    assert_eq!(
+        streams
+            .append_batch("events", vec![serde_json::json!("late")])
+            .await
+            .unwrap_err()
+            .kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_a_stream_during_a_standalone_seal_withdraws_the_marker_and_its_blob() {
+    if std::env::var("TSD_MONGO_URL").is_err() {
+        return;
+    }
+    let (connection, streams, blobs, started, resume) =
+        paused_standalone_seal("tsd49_seal_deleted").await;
+    let sealing = {
+        let streams = streams.clone();
+        tokio::spawn(async move { streams.seal("events").await })
+    };
+    started.notified().await;
+    assert!(streams.delete_stream("events").await.unwrap());
+    resume.notify_one();
+    assert_eq!(
+        sealing.await.unwrap().unwrap_err().kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert!(
+        blobs.values.lock().unwrap().is_empty(),
+        "the withdrawn seal's blob is deleted"
+    );
+    assert_eq!(
+        streams.read_window("events", 0, 10).await.unwrap(),
+        Vec::<tinystoragedrivers_types::StreamEntry>::new()
+    );
+    streams
+        .append_batch("events", vec![serde_json::json!("fresh")])
+        .await
+        .unwrap();
+    assert_eq!(
+        streams.read_window("events", 0, 10).await.unwrap(),
+        vec![tinystoragedrivers_types::StreamEntry {
+            offset: 0,
+            value: serde_json::json!("fresh"),
+        }]
+    );
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_append_racing_a_standalone_seal_takes_the_offset_and_the_seal_conflicts() {
+    if std::env::var("TSD_MONGO_URL").is_err() {
+        return;
+    }
+    let (connection, streams, blobs, started, resume) =
+        paused_standalone_seal("tsd49_seal_appended").await;
+    let sealing = {
+        let streams = streams.clone();
+        tokio::spawn(async move { streams.seal("events").await })
+    };
+    started.notified().await;
+    assert_eq!(
+        streams
+            .append_batch("events", vec![serde_json::json!("late")])
+            .await
+            .unwrap(),
+        2
+    );
+    resume.notify_one();
+    assert_eq!(
+        sealing.await.unwrap().unwrap_err().kind(),
+        tinystoragedrivers_types::ErrorKind::Conflict
+    );
+    assert!(
+        blobs.values.lock().unwrap().is_empty(),
+        "the refused seal's blob is deleted"
+    );
+    let window = streams.read_window("events", 0, 10).await.unwrap();
+    assert_eq!(window.len(), 3);
+    assert_eq!(window[2].value, serde_json::json!("late"));
+    connection.database().drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_standalone_truncation_floor_belongs_to_its_generation() {
+    let Ok(uri) = std::env::var("TSD_MONGO_URL") else {
+        return;
+    };
+    let connection = test_connection(&uri, "tsd49_floor_generation").await;
+    let streams = MongoStreams::new(connection.clone(), Scope::new("scope-a").unwrap())
+        .without_transactions_for_test();
+    streams
+        .append_batch("events", vec![serde_json::json!(1), serde_json::json!(2)])
+        .await
+        .unwrap();
+    assert_eq!(streams.truncate_before("events", 2).await.unwrap(), 2);
+    assert_eq!(
+        streams.read_window("events", 0, 10).await.unwrap(),
+        Vec::<tinystoragedrivers_types::StreamEntry>::new()
+    );
+    assert!(streams.delete_stream("events").await.unwrap());
+    streams
+        .append_batch(
+            "events",
+            vec![serde_json::json!("a"), serde_json::json!("b")],
+        )
+        .await
+        .unwrap();
+    let offsets: Vec<u64> = streams
+        .read_window("events", 0, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.offset)
+        .collect();
+    assert_eq!(
+        offsets,
+        [0, 1],
+        "the deleted generation's floor does not clip the new one"
+    );
     connection.database().drop().await.unwrap();
 }

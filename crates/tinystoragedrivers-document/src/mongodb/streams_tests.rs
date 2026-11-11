@@ -26,6 +26,7 @@ async fn streams_without_server() -> MongoStreams {
         blobs: None,
         condition_guard: None,
         truncate_pause: None,
+        seal_pause: None,
     }
 }
 
