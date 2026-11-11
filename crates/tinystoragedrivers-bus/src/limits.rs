@@ -19,7 +19,10 @@
 /// Version 7 uses the shared `tinystoragedrivers-types` values in the typed
 /// wire requests, including its expanded filter/query contract and six-port
 /// storage bundle.
-pub const CONTRACT_VERSION: u32 = 7;
+///
+/// Version 8 adds the `put_with` batch operation (`WriteOp::PutWith`), which
+/// carries a put's schema version and expiry inside an atomic batch.
+pub const CONTRACT_VERSION: u32 = 8;
 /// `TinyBus` frame cap. No request or reply may exceed it.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Encoded-size cap for one inline page, batch or record set (half the frame,

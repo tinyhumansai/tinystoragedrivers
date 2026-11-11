@@ -7,7 +7,8 @@ use tinystoragedrivers_api::DocumentStore;
 use tinystoragedrivers_types::Capability;
 use tinystoragedrivers_types::ErrorKind;
 use tinystoragedrivers_types::{
-    CollectionSpec, Cursor, IndexSpec, Precondition, Query, Version, WriteOp, WriteResult,
+    CollectionSpec, Cursor, IndexSpec, Precondition, Query, Version, WriteOp, WriteOptions,
+    WriteResult,
 };
 use tinystoragedrivers_types::{Filter, Sort};
 
@@ -769,6 +770,58 @@ async fn batches(storage: &dyn DocumentStore) {
     assert!(
         ok(docs.get(&right, "c").await, "rolled back").is_none(),
         "a failed batch applies nothing"
+    );
+
+    if has(storage.capabilities(), Capability::RecordMetadata) {
+        batched_options(docs, &right).await;
+    }
+}
+
+/// A batched `PutWith` records its options exactly as a single `put_with`,
+/// and a batched plain `Put` writes the defaults over them.
+async fn batched_options(docs: &dyn DocumentStore, coll: &str) {
+    const EXPIRES_MS: i64 = 4_102_444_800_000;
+    ok(
+        docs.atomic_batch(vec![WriteOp::PutWith {
+            collection: coll.to_owned(),
+            id: "with".into(),
+            doc: json!({"v": 1}),
+            precondition: Precondition::Absent,
+            options: WriteOptions::new().schema(3).expires_ms(EXPIRES_MS),
+        }])
+        .await,
+        "batched put_with",
+    );
+    let found =
+        ok(docs.get(coll, "with").await, "get batched put_with").expect("batched put_with landed");
+    assert_eq!(
+        found.meta.schema, 3,
+        "a batched put_with records its schema"
+    );
+    assert_eq!(
+        found.meta.expires_ms,
+        Some(EXPIRES_MS),
+        "a batched put_with records its expiry"
+    );
+
+    ok(
+        docs.atomic_batch(vec![WriteOp::Put {
+            collection: coll.to_owned(),
+            id: "with".into(),
+            doc: json!({"v": 2}),
+            precondition: Precondition::None,
+        }])
+        .await,
+        "batched plain put",
+    );
+    let found = ok(docs.get(coll, "with").await, "get batched put").expect("batched put landed");
+    assert_eq!(
+        found.meta.schema, 0,
+        "a batched plain put declares no schema"
+    );
+    assert_eq!(
+        found.meta.expires_ms, None,
+        "a batched plain put clears the expiry"
     );
 }
 

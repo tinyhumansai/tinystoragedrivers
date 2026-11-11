@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::Meta;
+use super::{Meta, WriteOptions};
 use crate::error::{Result, StorageError};
 use crate::filter::{Filter, Sort};
 
@@ -375,6 +375,23 @@ pub enum WriteOp {
         /// Precondition.
         #[serde(default)]
         precondition: Precondition,
+    },
+    /// A document replacement with explicit [`WriteOptions`] (schema version
+    /// and expiry), applied as `DocumentStore::put_with` applies them. A plain
+    /// [`Put`](WriteOp::Put) writes [`WriteOptions::default`].
+    PutWith {
+        /// Collection.
+        collection: String,
+        /// Document id.
+        id: String,
+        /// Document body.
+        doc: Value,
+        /// Precondition.
+        #[serde(default)]
+        precondition: Precondition,
+        /// Write options, applied exactly as a single `put_with` applies them.
+        #[serde(default)]
+        options: WriteOptions,
     },
     /// A document deletion operation.
     Delete {

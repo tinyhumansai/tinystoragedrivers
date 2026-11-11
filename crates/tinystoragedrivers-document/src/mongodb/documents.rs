@@ -281,6 +281,50 @@ impl MongoDocuments {
         Ok(version)
     }
 
+    /// Applies one batch operation inside the batch's transaction. A plain
+    /// `Put` writes the default options; `PutWith` writes its own.
+    async fn batch_op(&self, op: WriteOp, session: &mut ClientSession) -> Result<WriteResult> {
+        Ok(match op {
+            WriteOp::Put {
+                collection,
+                id,
+                doc,
+                precondition,
+            } => WriteResult::Put {
+                version: self
+                    .put_with_session(
+                        &collection,
+                        &id,
+                        doc,
+                        precondition,
+                        WriteOptions::default(),
+                        Some(session),
+                    )
+                    .await?,
+            },
+            WriteOp::PutWith {
+                collection,
+                id,
+                doc,
+                precondition,
+                options,
+            } => WriteResult::Put {
+                version: self
+                    .put_with_session(&collection, &id, doc, precondition, options, Some(session))
+                    .await?,
+            },
+            WriteOp::Delete {
+                collection,
+                id,
+                precondition,
+            } => WriteResult::Delete {
+                removed: self
+                    .delete_with_session(&collection, &id, precondition, Some(session))
+                    .await?,
+            },
+        })
+    }
+
     async fn delete_with_session(
         &self,
         collection: &str,
@@ -787,7 +831,9 @@ impl DocumentStore for MongoDocuments {
         }
         for op in &ops {
             let collection = match op {
-                WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. } => collection,
+                WriteOp::Put { collection, .. }
+                | WriteOp::PutWith { collection, .. }
+                | WriteOp::Delete { collection, .. } => collection,
             };
             validate_collection(collection)?;
             if self.condition.is_none() {
@@ -827,35 +873,7 @@ impl DocumentStore for MongoDocuments {
 
             let mut results = Vec::with_capacity(ops.len());
             for op in ops {
-                let result = match op {
-                    WriteOp::Put {
-                        collection,
-                        id,
-                        doc,
-                        precondition,
-                    } => WriteResult::Put {
-                        version: self
-                            .put_with_session(
-                                &collection,
-                                &id,
-                                doc,
-                                precondition,
-                                WriteOptions::default(),
-                                Some(&mut session),
-                            )
-                            .await?,
-                    },
-                    WriteOp::Delete {
-                        collection,
-                        id,
-                        precondition,
-                    } => WriteResult::Delete {
-                        removed: self
-                            .delete_with_session(&collection, &id, precondition, Some(&mut session))
-                            .await?,
-                    },
-                };
-                results.push(result);
+                results.push(self.batch_op(op, &mut session).await?);
             }
             Ok::<_, StorageError>(results)
         }

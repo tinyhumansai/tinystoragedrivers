@@ -311,6 +311,12 @@ impl DocumentStore for MemoryDocuments {
                     id,
                     doc,
                     ..
+                }
+                | WriteOp::PutWith {
+                    collection,
+                    id,
+                    doc,
+                    ..
                 } => {
                     validate_collection(collection)?;
                     validate_id(id)?;
@@ -326,7 +332,9 @@ impl DocumentStore for MemoryDocuments {
             Self::check_schema(&check.collection)?;
         }
         for op in &ops {
-            let (WriteOp::Put { collection, .. } | WriteOp::Delete { collection, .. }) = op;
+            let (WriteOp::Put { collection, .. }
+            | WriteOp::PutWith { collection, .. }
+            | WriteOp::Delete { collection, .. }) = op;
             Self::check_schema(collection)?;
         }
         // The clock is read under the lock, where the guard check and the
@@ -362,6 +370,22 @@ impl DocumentStore for MemoryDocuments {
                         doc,
                         precondition,
                         options: WriteOptions::default(),
+                    };
+                    WriteResult::Put {
+                        version: draft.put(scope, &collection, &id, write, now)?,
+                    }
+                }
+                WriteOp::PutWith {
+                    collection,
+                    id,
+                    doc,
+                    precondition,
+                    options,
+                } => {
+                    let write = Write {
+                        doc,
+                        precondition,
+                        options,
                     };
                     WriteResult::Put {
                         version: draft.put(scope, &collection, &id, write, now)?,

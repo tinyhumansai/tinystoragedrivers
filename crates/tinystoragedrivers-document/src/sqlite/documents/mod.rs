@@ -388,6 +388,12 @@ impl DocumentStore for SqliteDocuments {
                     id,
                     doc,
                     ..
+                }
+                | WriteOp::PutWith {
+                    collection,
+                    id,
+                    doc,
+                    ..
                 } => {
                     validate_collection(collection)?;
                     validate_id(id)?;
@@ -416,6 +422,23 @@ impl DocumentStore for SqliteDocuments {
                         precondition,
                     } => Ok(WriteResult::Put {
                         version: ops::put(conn, ctx, &collection, &id, &doc, precondition)?,
+                    }),
+                    WriteOp::PutWith {
+                        collection,
+                        id,
+                        doc,
+                        precondition,
+                        options,
+                    } => Ok(WriteResult::Put {
+                        version: ops::put_with(
+                            conn,
+                            ctx,
+                            &collection,
+                            &id,
+                            &doc,
+                            precondition,
+                            options,
+                        )?,
                     }),
                     WriteOp::Delete {
                         collection,

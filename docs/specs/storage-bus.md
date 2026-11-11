@@ -99,7 +99,7 @@ nor S3 endpoints are passed through a module request or module-controlled URL.
 
 ## Wire reference
 
-Contract version: `CONTRACT_VERSION = 7` (crate `tinystoragedrivers-bus`).
+Contract version: `CONTRACT_VERSION = 8` (crate `tinystoragedrivers-bus`).
 Interface `ai.tinyhumans.tinystorage.Storage`; objects and finite selectors:
 
 | Object | Selectors | Route |
@@ -205,7 +205,10 @@ Carried (additive; every new field is optional and defaulted):
   decode and is refused `InvalidInput`), and `BusDocuments::put_with` refuses it
   locally with `InvalidInput`. A module can never choose a record's creation
   time; `created_ms` and `updated_ms` always come from the host driver's clock.
-  Batch `Put` operations carry no options, as the native `WriteOp` has none.
+  In a batch, `WriteOp::PutWith` (wire tag `put_with`) carries
+  `WriteOptions` and is applied exactly as `put_with`; a plain `put` op writes
+  the defaults. As on `Put`, a batched `created_ms` is refused `InvalidInput`
+  by both the client and the host.
 - `Streams.Seal` takes `StreamRequest { stream }` and replies
   `SealResponse { base, len, blob_bytes }` (the native `SealOutcome`). Sealing
   a stream the module may append to is within its grant, so it is exposed;
@@ -275,7 +278,8 @@ or `{"kind":"dead_letter","reason":"..."}`. `Features` replies
 - Queue manifest admission remains host policy. The transport receives an
   already-constrained queue port and does not parse a manifest or admit queue
   declarations.
-- Contract version 7 pins the current selectors and wire shapes.
+- Contract version 7 pins the current selectors and wire shapes; version 8
+  adds the `put_with` batch operation.
 
 ## Real TinyBus transport
 

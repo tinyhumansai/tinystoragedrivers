@@ -167,7 +167,16 @@ fn batch_ops(ops: Vec<wire::WriteOp>) -> Result<Vec<WriteOp>, wire::StorageFailu
     if ops.len() > MAX_BATCH_OPS {
         return Err(invalid());
     }
+    // `created_ms` is a host-only migration option, as on `Put`: a module
+    // never chooses a record's creation time, batched or not.
+    if ops.iter().any(sets_created_ms) {
+        return Err(invalid());
+    }
     Ok(ops.into_iter().map(op_from_wire).collect())
+}
+
+fn sets_created_ms(op: &wire::WriteOp) -> bool {
+    matches!(op, WriteOp::PutWith { options, .. } if options.created_ms.is_some())
 }
 
 fn bounded_names(names: &[String]) -> Reply {
@@ -180,3 +189,7 @@ fn bounded_names(names: &[String]) -> Reply {
 pub(super) fn bounded_list(names: &[String]) -> Reply {
     bounded_names(names)
 }
+
+#[cfg(test)]
+#[path = "documents_tests.rs"]
+mod tests;

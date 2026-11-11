@@ -127,6 +127,11 @@ async fn drop_collection(&self, collection: &str) -> Result<()>;
 async fn collections(&self, prefix: &str) -> Result<Vec<String>>;
 ```
 
+A batch applies `WriteOp::Put` with default `WriteOptions` and
+`WriteOp::PutWith` with its own options, exactly as `put_with` does: a schema
+version, an expiry, and, on a host driver with `RecordMetadata`, a migration
+creation time.
+
 `DocumentStoreExt` supplies `get_as<T>(collection, id) ->
 Result<Option<Versioned<T>>>`, `put_as<T>(collection, id, &T, Precondition) ->
 Result<Version>`, `query_as<T>(collection, &Query) ->

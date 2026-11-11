@@ -97,6 +97,26 @@ fn document_write_and_search_values_keep_wire_tags() {
     let put_wire = serde_json::to_value(&put).unwrap();
     assert_eq!(put_wire["op"], "put");
     assert_eq!(serde_json::from_value::<WriteOp>(put_wire).unwrap(), put);
+    let put_with = WriteOp::PutWith {
+        collection: "jobs".into(),
+        id: "a".into(),
+        doc: serde_json::json!({"x":1}),
+        precondition: Precondition::Absent,
+        options: WriteOptions::new().schema(3).expires_ms(9),
+    };
+    let put_with_wire = serde_json::to_value(&put_with).unwrap();
+    assert_eq!(put_with_wire["op"], "put_with");
+    assert_eq!(put_with_wire["options"]["schema"], 3);
+    assert_eq!(
+        serde_json::from_value::<WriteOp>(put_with_wire).unwrap(),
+        put_with
+    );
+    // Options default when omitted, so a hand-written op needs only the body.
+    let bare: WriteOp = serde_json::from_value(
+        serde_json::json!({"op": "put_with", "collection": "jobs", "id": "a", "doc": 1}),
+    )
+    .unwrap();
+    assert!(matches!(bare, WriteOp::PutWith { options, .. } if options.is_default()));
     let result = WriteResult::Put {
         version: Version(2),
     };

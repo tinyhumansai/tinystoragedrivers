@@ -44,6 +44,14 @@ fn batch(checks: &[ReadCheck], ops: Vec<WriteOp>) -> Result<wire::BatchRequest> 
             "an atomic batch is limited to 1000 operations",
         ));
     }
+    if ops
+        .iter()
+        .any(|op| matches!(op, WriteOp::PutWith { options, .. } if options.created_ms.is_some()))
+    {
+        return Err(StorageError::invalid_input(
+            "a module cannot set created_ms: it is a host-only migration option",
+        ));
+    }
     Ok(wire::BatchRequest {
         checks: via(checks)?,
         ops: ops.into_iter().map(op_to_wire).collect(),

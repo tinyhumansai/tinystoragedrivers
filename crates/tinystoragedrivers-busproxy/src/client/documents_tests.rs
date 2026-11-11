@@ -223,3 +223,40 @@ async fn unsupported_document_features_keep_the_requested_capability() {
         ErrorKind::Unsupported(Capability::FullText)
     );
 }
+
+#[tokio::test]
+async fn a_batched_put_with_carries_its_options_across_the_wire() {
+    let storage = memory_client("batched-options").await;
+    let documents = storage.documents();
+    documents
+        .atomic_batch(vec![WriteOp::PutWith {
+            collection: "events".into(),
+            id: "one".into(),
+            doc: serde_json::json!({"kind": "created"}),
+            precondition: Precondition::Absent,
+            options: WriteOptions::new().schema(7).expires_ms(i64::MAX),
+        }])
+        .await
+        .unwrap();
+    let found = documents.get("events", "one").await.unwrap().unwrap();
+    assert_eq!(found.meta.schema, 7);
+    assert_eq!(found.meta.expires_ms, Some(i64::MAX));
+}
+
+#[tokio::test]
+async fn a_batched_creation_time_is_rejected_before_sending() {
+    let storage = memory_client("batched-created").await;
+    let documents = storage.documents();
+    let error = documents
+        .atomic_batch(vec![WriteOp::PutWith {
+            collection: "notes".into(),
+            id: "id".into(),
+            doc: serde_json::json!({}),
+            precondition: Precondition::None,
+            options: WriteOptions::new().created_ms(1),
+        }])
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert!(documents.get("notes", "id").await.unwrap().is_none());
+}
