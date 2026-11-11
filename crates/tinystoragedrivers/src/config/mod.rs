@@ -501,16 +501,21 @@ impl CompositeBackend {
                     connection.clone(),
                     scope.clone(),
                 )) as Arc<dyn tinystoragedrivers_api::DocumentStore>;
-                let streams = Arc::new(tinystoragedrivers_document::mongodb::MongoStreams::new(
-                    connection.clone(),
-                    scope.clone(),
-                )) as Arc<dyn tinystoragedrivers_api::StreamStore>;
-                let kv = Arc::new(kv_factory.for_scope(scope))
-                    as Arc<dyn tinystoragedrivers_api::KvStore>;
                 let blobs = Arc::new(tinystoragedrivers_blob::MongoBlobStore::new(
                     connection.clone(),
                     scope.clone(),
                 )) as Arc<dyn tinystoragedrivers_api::BlobStore>;
+                // Sealing writes the stream's log to a sealed blob in the same
+                // scope, so the streams port gets the scope's blob store.
+                let streams = Arc::new(
+                    tinystoragedrivers_document::mongodb::MongoStreams::new(
+                        connection.clone(),
+                        scope.clone(),
+                    )
+                    .with_blob_store(blobs.clone()),
+                ) as Arc<dyn tinystoragedrivers_api::StreamStore>;
+                let kv = Arc::new(kv_factory.for_scope(scope))
+                    as Arc<dyn tinystoragedrivers_api::KvStore>;
                 let queues = Arc::new(tinystoragedrivers_queue::DocumentQueue::new(&docs))
                     as Arc<dyn tinystoragedrivers_api::QueueStore>;
                 (docs, streams, kv, blobs, queues, unsupported_secrets())
@@ -575,12 +580,22 @@ impl CompositeBackend {
                         condition.clone(),
                     )?,
                 ) as Arc<dyn tinystoragedrivers_api::DocumentStore>;
+                // GridFS writes cannot join the condition's transaction, so the
+                // conditioned bundle exposes no blob port. Sealing still needs a
+                // blob for the sealed log: it is written before the guarded
+                // marker transaction and deleted if that transaction fails, so
+                // an unconditioned store in the same scope is safe for it.
+                let seal_blobs = Arc::new(tinystoragedrivers_blob::MongoBlobStore::new(
+                    connection.clone(),
+                    scope.clone(),
+                )) as Arc<dyn tinystoragedrivers_api::BlobStore>;
                 let streams = Arc::new(
                     tinystoragedrivers_document::mongodb::MongoStreams::conditioned(
                         connection.clone(),
                         scope.clone(),
                         condition.clone(),
-                    )?,
+                    )?
+                    .with_blob_store(seal_blobs),
                 ) as Arc<dyn tinystoragedrivers_api::StreamStore>;
                 let kv = Arc::new(kv_factory.conditioned_for_scope(scope, condition.clone())?)
                     as Arc<dyn tinystoragedrivers_api::KvStore>;
@@ -651,3 +666,7 @@ impl StorageBackend for CompositeBackend {
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "mongodb"))]
+#[path = "mod_mongo_seal_tests.rs"]
+mod mongo_seal_tests;
