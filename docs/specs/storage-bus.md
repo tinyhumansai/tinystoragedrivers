@@ -172,11 +172,15 @@ as absent; a zero lifetime is expired on arrival; a plain `put` of the key
 clears the lifetime; reclaiming the storage is the driver's business. The
 memory, SQLite, file, MongoDB and S3 drivers provide it (S3 as `x-amz-meta-`
 user metadata, so `list` already pays one HEAD per object; MongoDB as
-`metadata.expires_at_ms` on the GridFS file). Reclaiming is each driver's
-business: file and MongoDB reclaim the lapsed blob on the read that notices it
-(and expose `sweep_expired_blobs` / `sweep_expired_blobs_generation` for a
-sweeper), S3 only reclaims through `S3Blobs::sweep_expired` because object
-deletes cannot be conditional. The conformance suite asserts expiry on every
+`metadata.expires_at_ms` on the GridFS file). No driver reclaims storage on
+the read that notices a lapsed blob: reads only treat it as absent, and the
+storage is freed by `BlobStore::sweep_expired` or an explicit delete. The
+memory and SQLite sweeps check expiry and delete under one lock or
+transaction. MongoDB deletes only the versions of a key up to its newest
+expired one, oldest first: a version written during the sweep keeps its new
+value, and a sweep that fails partway never leaves a superseded version as the
+newest. The file and S3 sweeps check, then delete (S3 object deletes cannot be
+conditional), so a key re-put between the two can still be removed. The conformance suite asserts expiry on every
 driver that claims the capability. On the
 wire `PutBlobRequest` and `PutBlobStreamRequest` gain an optional `ttl_ms` and
 `BlobCapabilities` gains `ttl`; adding them made the contract version 3. A

@@ -34,6 +34,8 @@ pub struct MongoBlobStore {
     connection: MongoConnection,
     scope: Scope,
     indexes_ready: Arc<AsyncMutex<bool>>,
+    #[cfg(test)]
+    sweep_pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
 
 impl MongoBlobStore {
@@ -44,7 +46,20 @@ impl MongoBlobStore {
             connection,
             scope,
             indexes_ready: Arc::new(AsyncMutex::new(false)),
+            #[cfg(test)]
+            sweep_pause: None,
         }
+    }
+
+    /// Pause `sweep_expired` between its two passes.
+    #[cfg(test)]
+    pub(crate) fn pause_sweep_for_test(
+        mut self,
+        started: Arc<tokio::sync::Notify>,
+        resume: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        self.sweep_pause = Some((started, resume));
+        self
     }
 
     async fn bucket(&self) -> Result<GridFsBucket> {
@@ -549,15 +564,28 @@ impl BlobStore for MongoBlobStore {
         let expired = self
             .files(doc! {"metadata.expires_at_ms": {"$lte": to_i64((self.connection.clock())())}})
             .await?;
-        let mut keys = BTreeMap::new();
+        // The newest expired version of each key. `files` sorts `_id`
+        // descending within a filename, so the first one seen is it.
+        let mut newest_expired = BTreeMap::new();
         for file in expired {
             if let Some(key) = file.filename {
-                keys.insert(key, ());
+                newest_expired.entry(key).or_insert(file.id);
             }
         }
+        #[cfg(test)]
+        if let Some((started, resume)) = &self.sweep_pause {
+            started.notify_one();
+            resume.notified().await;
+        }
         let mut count = 0_u64;
-        for key in keys.into_keys() {
-            for file in self.files(doc! {"filename": &key}).await? {
+        for (key, bound) in newest_expired {
+            // Only versions up to that one: a version written since this sweep
+            // began is newer and stays. Older versions go first, so a failure
+            // partway never leaves a superseded version as the newest.
+            let versions = self
+                .files(doc! {"filename": &key, "_id": {"$lte": bound}})
+                .await?;
+            for file in versions.into_iter().rev() {
                 self.delete_id(file.id).await?;
                 count += 1;
             }
